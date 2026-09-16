@@ -37,6 +37,18 @@ consuming app. The package runs unchanged in Node, Bun, and the browser.
 head) as `claude-style` / `codex-style` / `chat-style` / `session-style` —
 content classification only, no directory scanning.
 
+## Install
+
+```sh
+npm i github:Atituiset/agent-session-format
+```
+
+The package ships **both ESM and CJS** builds: `import` resolves to
+`dist/index.js`, `require("agent-session-format")` (e.g. from a CommonJS
+Electron main process) resolves to `dist/index.cjs`, with type declarations
+for both. `dist/` is committed, so git-dependency installs work without
+running build scripts.
+
 ## Usage
 
 ```ts
