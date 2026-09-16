@@ -1,6 +1,6 @@
 {
   "name": "agent-session-format",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Environment-agnostic parsers that normalize AI coding-agent session transcripts into one zod-validated intermediate representation (NIR).",
   "license": "MIT",
   "author": "Atituiset",

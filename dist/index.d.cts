@@ -190,6 +190,13 @@ interface OpencodeOptions {
  * reach multiple GB.
  */
 declare function opencodeSessionsFromDb(db: SqliteDb, opts: OpencodeOptions): Promise<NirSession[]>;
+/**
+ * Map a single opencode session to NIR, querying only that session's rows.
+ * Use this over bridges (SSH/WSL) where the whole-DB scan costs one remote
+ * round-trip per message of every other session. Returns null when the
+ * session id is not found (or it has no parseable messages).
+ */
+declare function opencodeSessionFromDb(db: SqliteDb, sessionId: string, opts: OpencodeOptions): Promise<NirSession | null>;
 
 /**
  * Parse one Antigravity (Gemini CLI) `transcript.jsonl`. Pure: content in,
@@ -216,6 +223,16 @@ declare function parseHermesDump(text: string, opts: {
 declare function hermesSessionsFromDb(db: SqliteDb, opts: {
     source: string;
 }): Promise<NirSession[]>;
+/**
+ * Map a single Hermes session to NIR, querying only that session's rows. Use
+ * this over bridges (SSH/WSL) where the whole-DB scan costs remote queries
+ * for every other session. Returns null when the session id is not found (or
+ * it has no parseable messages). Archived/hidden sessions are excluded, same
+ * as the whole-DB variant.
+ */
+declare function hermesSessionFromDb(db: SqliteDb, sessionId: string, opts: {
+    source: string;
+}): Promise<NirSession | null>;
 
 /**
  * Content classification for arbitrary transcript text — the heuristics behind
@@ -251,4 +268,4 @@ declare function parseDetectedTranscript(kind: GenericKind, text: string, opts: 
     id?: string;
 }): NirSession | null;
 
-export { type GenericKind, type KimiWireOptions, type NirMessage, type NirRole, type NirSession, type NirTokenUsage, type OpencodeOptions, type ParseOptions, type SqliteDb, type SqliteStatement, buildSession, collectPatchFiles, decodeClaudeProjectSlug, detectKind, estTokens, extractTokens, flattenContent, hermesSessionsFromDb, isoFromMs, isoFromSecsOrMs, makeMsg, makeNirSession, nirMessageSchema, nirRoleSchema, nirSessionSchema, nirTokenUsageSchema, opencodeSessionsFromDb, parseAntigravityTranscript, parseChatTranscript, parseClaudeCodeTranscript, parseCodewhaleSession, parseCodexRollout, parseDetectedTranscript, parseHermesDump, parseKimiWire, parseSessionJsonDocument, safeJsonParse };
+export { type GenericKind, type KimiWireOptions, type NirMessage, type NirRole, type NirSession, type NirTokenUsage, type OpencodeOptions, type ParseOptions, type SqliteDb, type SqliteStatement, buildSession, collectPatchFiles, decodeClaudeProjectSlug, detectKind, estTokens, extractTokens, flattenContent, hermesSessionFromDb, hermesSessionsFromDb, isoFromMs, isoFromSecsOrMs, makeMsg, makeNirSession, nirMessageSchema, nirRoleSchema, nirSessionSchema, nirTokenUsageSchema, opencodeSessionFromDb, opencodeSessionsFromDb, parseAntigravityTranscript, parseChatTranscript, parseClaudeCodeTranscript, parseCodewhaleSession, parseCodexRollout, parseDetectedTranscript, parseHermesDump, parseKimiWire, parseSessionJsonDocument, safeJsonParse };

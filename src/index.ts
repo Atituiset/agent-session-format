@@ -35,11 +35,15 @@ export {
   type KimiWireOptions,
 } from "./parsers/codex-family.js";
 
-export { opencodeSessionsFromDb, type OpencodeOptions } from "./parsers/opencode.js";
+export {
+  opencodeSessionsFromDb,
+  opencodeSessionFromDb,
+  type OpencodeOptions,
+} from "./parsers/opencode.js";
 
 export { parseAntigravityTranscript } from "./parsers/antigravity.js";
 
-export { parseHermesDump, hermesSessionsFromDb } from "./parsers/hermes.js";
+export { parseHermesDump, hermesSessionsFromDb, hermesSessionFromDb } from "./parsers/hermes.js";
 
 export {
   detectKind,

@@ -28,9 +28,9 @@ consuming app. The package runs unchanged in Node, Bun, and the browser.
 | `codex-family` | Codex CLI, DeepSeek (rollout JSONL) | rollout event stream | `parseCodexRollout(text, opts)` |
 | `codex-family` | Kimi Code | `agents/<name>/wire.jsonl` event stream | `parseKimiWire(text, opts)` |
 | `codex-family` | codewhale, DeepSeek (single-file JSON) | `{metadata, messages}` document | `parseSessionJsonDocument` / `parseCodewhaleSession(text, opts)` |
-| `opencode-sqlite` | opencode | `opencode.db` (SQLite) | `opencodeSessionsFromDb(db, opts)` |
+| `opencode-sqlite` | opencode | `opencode.db` (SQLite) | `opencodeSessionsFromDb(db, opts)` / `opencodeSessionFromDb(db, id, opts)` |
 | `antigravity-transcript` | Gemini / Antigravity | `brain/<id>/.../transcript.jsonl` | `parseAntigravityTranscript(text, opts)` |
-| `hermes` | Hermes | `request_dump_*.json` or `state.db` | `parseHermesDump(text, opts)` / `hermesSessionsFromDb(db, opts)` |
+| `hermes` | Hermes | `request_dump_*.json` or `state.db` | `parseHermesDump(text, opts)` / `hermesSessionsFromDb(db, opts)` / `hermesSessionFromDb(db, id, opts)` |
 | generic detection | unknown agents | any of the above | `detectKind(text)`, `parseDetectedTranscript(kind, text, opts)` |
 
 `detectKind` classifies arbitrary transcript text (a whole file or a truncated
@@ -127,6 +127,19 @@ const db = {
   }),
 };
 const sessions = await opencodeSessionsFromDb(db, { source: "opencode" });
+```
+
+**Single-session reads:** when you only need one session, prefer the
+per-session variants — every query is filtered by session id, which over a
+remote bridge avoids one round-trip per message of every *other* session.
+They return the same NIR shape as the whole-DB variants, or `null` when the
+session id is not found:
+
+```ts
+import { opencodeSessionFromDb, hermesSessionFromDb } from "agent-session-format";
+
+const one = await opencodeSessionFromDb(db, "ses_abc123", { source: "opencode" });
+const hermes = await hermesSessionFromDb(db, "20260602_233910_562888", { source: "hermes" });
 ```
 
 ## Development

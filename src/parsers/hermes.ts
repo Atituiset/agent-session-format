@@ -1,5 +1,5 @@
 import type { NirMessage, NirSession } from "../schema.js";
-import type { SqliteDb } from "../sqlite.js";
+import type { SqliteDb, SqliteStatement } from "../sqlite.js";
 import { buildSession, isoFromSecsOrMs, makeMsg, safeJsonParse } from "../util.js";
 
 const MAX_TEXT = 30_000;
@@ -96,68 +96,102 @@ export async function hermesSessionsFromDb(
        FROM sessions WHERE archived = 0 AND hidden = 0 ORDER BY started_at DESC`,
     )
     .all()) as HermesSessionRow[];
-  const msgStmt = db.prepare(
-    `SELECT role, content, tool_calls, tool_call_id, timestamp, reasoning_content
-     FROM messages WHERE session_id = ? AND active = 1 ORDER BY timestamp`,
-  );
+  const msgStmt = prepareMessageStmt(db);
 
   const out: NirSession[] = [];
   for (const row of rows) {
-    const msgRows = (await msgStmt.all(row.id)) as HermesMessageRow[];
-    const messages: NirMessage[] = [];
-    for (const mr of msgRows) {
-      const role = mr.role;
-      if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") continue;
-      const ts = isoFromSecsOrMs(mr.timestamp);
-      if (role === "tool") {
-        messages.push(
-          makeMsg({
-            role: "tool",
-            content: normalizeHermesContent(mr.content).slice(0, MAX_TEXT),
-            toolCallId: mr.tool_call_id || null,
-            timestamp: ts,
-          }),
-        );
-        continue;
-      }
-      const thinking = typeof mr.reasoning_content === "string" ? mr.reasoning_content : "";
-      if (thinking.trim()) {
-        messages.push(makeMsg({ role: "assistant", content: "", thinking, timestamp: ts }));
-      }
-      const content = normalizeHermesContent(mr.content).slice(0, MAX_TEXT);
-      if (content) messages.push(makeMsg({ role, content, timestamp: ts }));
-      let calls: HermesToolCall[] = [];
-      if (typeof mr.tool_calls === "string" && mr.tool_calls) {
-        const parsed = safeJsonParse(mr.tool_calls);
-        if (Array.isArray(parsed)) calls = parsed as HermesToolCall[];
-      }
-      for (const tc of parseHermesToolCalls(calls)) {
-        messages.push(
-          makeMsg({
-            role: "assistant",
-            content: "",
-            toolName: tc.name,
-            toolInput: tc.input,
-            toolCallId: tc.id ?? null,
-            timestamp: ts,
-          }),
-        );
-      }
-    }
-    if (messages.length === 0) continue;
-    out.push(
-      buildSession({
-        id: row.id,
-        source: opts.source,
-        title: row.display_name || row.title,
-        model: row.model,
-        projectPath: row.cwd,
-        startedAt: isoFromSecsOrMs(row.started_at),
-        messages,
-      }),
-    );
+    const session = await mapSessionRow(row, msgStmt, opts);
+    if (session) out.push(session);
   }
   return out;
+}
+
+/**
+ * Map a single Hermes session to NIR, querying only that session's rows. Use
+ * this over bridges (SSH/WSL) where the whole-DB scan costs remote queries
+ * for every other session. Returns null when the session id is not found (or
+ * it has no parseable messages). Archived/hidden sessions are excluded, same
+ * as the whole-DB variant.
+ */
+export async function hermesSessionFromDb(
+  db: SqliteDb,
+  sessionId: string,
+  opts: { source: string },
+): Promise<NirSession | null> {
+  const rows = (await db
+    .prepare(
+      `SELECT id, title, display_name, started_at, cwd, model
+       FROM sessions WHERE archived = 0 AND hidden = 0 AND id = ?`,
+    )
+    .all(sessionId)) as HermesSessionRow[];
+  const row = rows[0];
+  if (!row) return null;
+  return mapSessionRow(row, prepareMessageStmt(db), opts);
+}
+
+function prepareMessageStmt(db: SqliteDb): SqliteStatement {
+  return db.prepare(
+    `SELECT role, content, tool_calls, tool_call_id, timestamp, reasoning_content
+     FROM messages WHERE session_id = ? AND active = 1 ORDER BY timestamp`,
+  );
+}
+
+async function mapSessionRow(
+  row: HermesSessionRow,
+  msgStmt: SqliteStatement,
+  opts: { source: string },
+): Promise<NirSession | null> {
+  const msgRows = (await msgStmt.all(row.id)) as HermesMessageRow[];
+  const messages: NirMessage[] = [];
+  for (const mr of msgRows) {
+    const role = mr.role;
+    if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") continue;
+    const ts = isoFromSecsOrMs(mr.timestamp);
+    if (role === "tool") {
+      messages.push(
+        makeMsg({
+          role: "tool",
+          content: normalizeHermesContent(mr.content).slice(0, MAX_TEXT),
+          toolCallId: mr.tool_call_id || null,
+          timestamp: ts,
+        }),
+      );
+      continue;
+    }
+    const thinking = typeof mr.reasoning_content === "string" ? mr.reasoning_content : "";
+    if (thinking.trim()) {
+      messages.push(makeMsg({ role: "assistant", content: "", thinking, timestamp: ts }));
+    }
+    const content = normalizeHermesContent(mr.content).slice(0, MAX_TEXT);
+    if (content) messages.push(makeMsg({ role, content, timestamp: ts }));
+    let calls: HermesToolCall[] = [];
+    if (typeof mr.tool_calls === "string" && mr.tool_calls) {
+      const parsed = safeJsonParse(mr.tool_calls);
+      if (Array.isArray(parsed)) calls = parsed as HermesToolCall[];
+    }
+    for (const tc of parseHermesToolCalls(calls)) {
+      messages.push(
+        makeMsg({
+          role: "assistant",
+          content: "",
+          toolName: tc.name,
+          toolInput: tc.input,
+          toolCallId: tc.id ?? null,
+          timestamp: ts,
+        }),
+      );
+    }
+  }
+  if (messages.length === 0) return null;
+  return buildSession({
+    id: row.id,
+    source: opts.source,
+    title: row.display_name || row.title,
+    model: row.model,
+    projectPath: row.cwd,
+    startedAt: isoFromSecsOrMs(row.started_at),
+    messages,
+  });
 }
 
 function parseHermesToolCalls(raw: HermesToolCall[] | undefined): { id?: string; name: string; input: Record<string, unknown> }[] {

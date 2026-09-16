@@ -669,145 +669,161 @@ function firstString(obj, keys) {
 
 // src/parsers/opencode.ts
 var MAX_TEXT = 3e4;
+var SESSION_COLUMNS = `s.id, s.directory, s.title, s.version, s.summary_additions, s.summary_deletions,
+       s.summary_files, s.time_created, s.time_updated, s.model, s.cost,
+       s.tokens_input, s.tokens_output, p.worktree`;
+function prepareMessageStmts(db) {
+  return {
+    msgStmt: db.prepare(
+      "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created"
+    ),
+    partStmt: db.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created")
+  };
+}
 async function opencodeSessionsFromDb(db, opts) {
-  const sessions = await db.prepare(
-    `SELECT s.id, s.directory, s.title, s.version, s.summary_additions, s.summary_deletions,
-              s.summary_files, s.time_created, s.time_updated, s.model, s.cost,
-              s.tokens_input, s.tokens_output, p.worktree
-       FROM session s LEFT JOIN project p ON p.id = s.project_id`
-  ).all();
-  const msgStmt = db.prepare(
-    "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created"
-  );
-  const partStmt = db.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created");
+  const sessions = await db.prepare(`SELECT ${SESSION_COLUMNS} FROM session s LEFT JOIN project p ON p.id = s.project_id`).all();
+  const { msgStmt, partStmt } = prepareMessageStmts(db);
   const out = [];
   for (const row of sessions) {
-    const messages = [];
-    const patchFiles = /* @__PURE__ */ new Set();
-    const msgRows = await msgStmt.all(row.id);
-    let model = row.model;
-    for (const mr of msgRows) {
-      let md;
+    const session = await mapSessionRow(row, msgStmt, partStmt, opts);
+    if (session) out.push(session);
+  }
+  return out;
+}
+async function opencodeSessionFromDb(db, sessionId, opts) {
+  const rows = await db.prepare(
+    `SELECT ${SESSION_COLUMNS} FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?`
+  ).all(sessionId);
+  const row = rows[0];
+  if (!row) return null;
+  const { msgStmt, partStmt } = prepareMessageStmts(db);
+  return mapSessionRow(row, msgStmt, partStmt, opts);
+}
+async function mapSessionRow(row, msgStmt, partStmt, opts) {
+  const messages = [];
+  const patchFiles = /* @__PURE__ */ new Set();
+  const msgRows = await msgStmt.all(row.id);
+  let model = row.model;
+  for (const mr of msgRows) {
+    let md;
+    try {
+      md = JSON.parse(mr.data);
+    } catch {
+      continue;
+    }
+    const role = md.role;
+    if (role !== "user" && role !== "assistant" && role !== "system") continue;
+    const modelField = md.model;
+    const mModel = typeof modelField?.modelID === "string" ? modelField.modelID : model;
+    if (typeof mModel === "string") model = mModel;
+    const tsMs = typeof md.time === "object" && md.time !== null ? md.time.created : mr.time_created;
+    const ts = isoFromMs(tsMs);
+    const tokensRaw = extractOpencodeTokens(md.tokens);
+    let textContent = "";
+    const partRows = await partStmt.all(mr.id);
+    for (const pr of partRows) {
+      let pd;
       try {
-        md = JSON.parse(mr.data);
+        pd = JSON.parse(pr.data);
       } catch {
         continue;
       }
-      const role = md.role;
-      if (role !== "user" && role !== "assistant" && role !== "system") continue;
-      const modelField = md.model;
-      const mModel = typeof modelField?.modelID === "string" ? modelField.modelID : model;
-      if (typeof mModel === "string") model = mModel;
-      const tsMs = typeof md.time === "object" && md.time !== null ? md.time.created : mr.time_created;
-      const ts = isoFromMs(tsMs);
-      const tokensRaw = extractOpencodeTokens(md.tokens);
-      let textContent = "";
-      const partRows = await partStmt.all(mr.id);
-      for (const pr of partRows) {
-        let pd;
-        try {
-          pd = JSON.parse(pr.data);
-        } catch {
-          continue;
-        }
-        const pt = pd.type;
-        if (pt === "text" && typeof pd.text === "string") {
-          textContent += (textContent ? "\n" : "") + pd.text;
-        } else if (pt === "tool" && typeof pd.tool === "string") {
-          const state = pd.state ?? {};
-          const callId = typeof pd.callID === "string" ? pd.callID : null;
+      const pt = pd.type;
+      if (pt === "text" && typeof pd.text === "string") {
+        textContent += (textContent ? "\n" : "") + pd.text;
+      } else if (pt === "tool" && typeof pd.tool === "string") {
+        const state = pd.state ?? {};
+        const callId = typeof pd.callID === "string" ? pd.callID : null;
+        messages.push(
+          makeMsg({
+            role: "assistant",
+            content: "",
+            toolName: pd.tool,
+            toolInput: state.input ?? null,
+            toolCallId: callId,
+            timestamp: ts,
+            model: mModel
+          })
+        );
+        const output = state.output;
+        if (typeof output === "string") {
           messages.push(
             makeMsg({
-              role: "assistant",
-              content: "",
+              role: "tool",
+              content: output.slice(0, MAX_TEXT),
               toolName: pd.tool,
-              toolInput: state.input ?? null,
               toolCallId: callId,
+              timestamp: ts
+            })
+          );
+        }
+      } else if (pt === "reasoning" && typeof pd.text === "string") {
+        const thinking = pd.text.trim();
+        if (thinking) {
+          messages.push(
+            makeMsg({
+              role,
+              content: "",
+              thinking,
               timestamp: ts,
               model: mModel
             })
           );
-          const output = state.output;
-          if (typeof output === "string") {
-            messages.push(
-              makeMsg({
-                role: "tool",
-                content: output.slice(0, MAX_TEXT),
-                toolName: pd.tool,
-                toolCallId: callId,
-                timestamp: ts
-              })
-            );
-          }
-        } else if (pt === "reasoning" && typeof pd.text === "string") {
-          const thinking = pd.text.trim();
-          if (thinking) {
-            messages.push(
-              makeMsg({
-                role,
-                content: "",
-                thinking,
-                timestamp: ts,
-                model: mModel
-              })
-            );
-          }
-        } else if (pt === "patch" && Array.isArray(pd.files)) {
-          for (const f of pd.files) {
-            if (typeof f === "string") patchFiles.add(f);
-          }
+        }
+      } else if (pt === "patch" && Array.isArray(pd.files)) {
+        for (const f of pd.files) {
+          if (typeof f === "string") patchFiles.add(f);
         }
       }
-      textContent = textContent.trim().slice(0, MAX_TEXT);
-      if (!textContent) continue;
-      const msg = makeMsg({ role, content: textContent, timestamp: ts, model: mModel });
-      if (tokensRaw) msg.tokens = { ...tokensRaw, cacheRead: 0, cacheWrite: 0 };
-      messages.push(msg);
     }
-    if (messages.length === 0) continue;
-    const hasRowTokens = !!(row.tokens_input || row.tokens_output);
-    const session = buildSession({
-      id: row.id,
-      source: opts.source,
-      sourceVersion: row.version,
-      title: row.title,
-      model,
-      cost: typeof row.cost === "number" ? row.cost : null,
-      projectPath: row.worktree ?? row.directory,
-      startedAt: isoFromMs(row.time_created),
-      endedAt: isoFromMs(row.time_updated),
-      messages,
-      ...hasRowTokens ? {
-        tokens: {
-          input: row.tokens_input ?? 0,
-          output: row.tokens_output ?? 0,
-          cacheRead: 0,
-          cacheWrite: 0
-        }
-      } : {},
-      rawMeta: {
-        title: row.title,
-        cost: row.cost,
-        additions: row.summary_additions,
-        deletions: row.summary_deletions,
-        filesChanged: row.summary_files,
-        ...patchFiles.size > 0 ? { patchFiles: [...patchFiles] } : {}
-      }
-    });
-    if (hasRowTokens && model) {
-      const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-      if (lastAssistant && !lastAssistant.tokens) {
-        lastAssistant.tokens = {
-          input: row.tokens_input ?? 0,
-          output: row.tokens_output ?? 0,
-          cacheRead: 0,
-          cacheWrite: 0
-        };
-      }
-    }
-    out.push(session);
+    textContent = textContent.trim().slice(0, MAX_TEXT);
+    if (!textContent) continue;
+    const msg = makeMsg({ role, content: textContent, timestamp: ts, model: mModel });
+    if (tokensRaw) msg.tokens = { ...tokensRaw, cacheRead: 0, cacheWrite: 0 };
+    messages.push(msg);
   }
-  return out;
+  if (messages.length === 0) return null;
+  const hasRowTokens = !!(row.tokens_input || row.tokens_output);
+  const session = buildSession({
+    id: row.id,
+    source: opts.source,
+    sourceVersion: row.version,
+    title: row.title,
+    model,
+    cost: typeof row.cost === "number" ? row.cost : null,
+    projectPath: row.worktree ?? row.directory,
+    startedAt: isoFromMs(row.time_created),
+    endedAt: isoFromMs(row.time_updated),
+    messages,
+    ...hasRowTokens ? {
+      tokens: {
+        input: row.tokens_input ?? 0,
+        output: row.tokens_output ?? 0,
+        cacheRead: 0,
+        cacheWrite: 0
+      }
+    } : {},
+    rawMeta: {
+      title: row.title,
+      cost: row.cost,
+      additions: row.summary_additions,
+      deletions: row.summary_deletions,
+      filesChanged: row.summary_files,
+      ...patchFiles.size > 0 ? { patchFiles: [...patchFiles] } : {}
+    }
+  });
+  if (hasRowTokens && model) {
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+    if (lastAssistant && !lastAssistant.tokens) {
+      lastAssistant.tokens = {
+        input: row.tokens_input ?? 0,
+        output: row.tokens_output ?? 0,
+        cacheRead: 0,
+        cacheWrite: 0
+      };
+    }
+  }
+  return session;
 }
 function extractOpencodeTokens(v) {
   if (!v || typeof v !== "object") return void 0;
@@ -1017,67 +1033,81 @@ async function hermesSessionsFromDb(db, opts) {
     `SELECT id, title, display_name, started_at, cwd, model
        FROM sessions WHERE archived = 0 AND hidden = 0 ORDER BY started_at DESC`
   ).all();
-  const msgStmt = db.prepare(
+  const msgStmt = prepareMessageStmt(db);
+  const out = [];
+  for (const row of rows) {
+    const session = await mapSessionRow2(row, msgStmt, opts);
+    if (session) out.push(session);
+  }
+  return out;
+}
+async function hermesSessionFromDb(db, sessionId, opts) {
+  const rows = await db.prepare(
+    `SELECT id, title, display_name, started_at, cwd, model
+       FROM sessions WHERE archived = 0 AND hidden = 0 AND id = ?`
+  ).all(sessionId);
+  const row = rows[0];
+  if (!row) return null;
+  return mapSessionRow2(row, prepareMessageStmt(db), opts);
+}
+function prepareMessageStmt(db) {
+  return db.prepare(
     `SELECT role, content, tool_calls, tool_call_id, timestamp, reasoning_content
      FROM messages WHERE session_id = ? AND active = 1 ORDER BY timestamp`
   );
-  const out = [];
-  for (const row of rows) {
-    const msgRows = await msgStmt.all(row.id);
-    const messages = [];
-    for (const mr of msgRows) {
-      const role = mr.role;
-      if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") continue;
-      const ts = isoFromSecsOrMs(mr.timestamp);
-      if (role === "tool") {
-        messages.push(
-          makeMsg({
-            role: "tool",
-            content: normalizeHermesContent(mr.content).slice(0, MAX_TEXT2),
-            toolCallId: mr.tool_call_id || null,
-            timestamp: ts
-          })
-        );
-        continue;
-      }
-      const thinking = typeof mr.reasoning_content === "string" ? mr.reasoning_content : "";
-      if (thinking.trim()) {
-        messages.push(makeMsg({ role: "assistant", content: "", thinking, timestamp: ts }));
-      }
-      const content = normalizeHermesContent(mr.content).slice(0, MAX_TEXT2);
-      if (content) messages.push(makeMsg({ role, content, timestamp: ts }));
-      let calls = [];
-      if (typeof mr.tool_calls === "string" && mr.tool_calls) {
-        const parsed = safeJsonParse(mr.tool_calls);
-        if (Array.isArray(parsed)) calls = parsed;
-      }
-      for (const tc of parseHermesToolCalls(calls)) {
-        messages.push(
-          makeMsg({
-            role: "assistant",
-            content: "",
-            toolName: tc.name,
-            toolInput: tc.input,
-            toolCallId: tc.id ?? null,
-            timestamp: ts
-          })
-        );
-      }
+}
+async function mapSessionRow2(row, msgStmt, opts) {
+  const msgRows = await msgStmt.all(row.id);
+  const messages = [];
+  for (const mr of msgRows) {
+    const role = mr.role;
+    if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") continue;
+    const ts = isoFromSecsOrMs(mr.timestamp);
+    if (role === "tool") {
+      messages.push(
+        makeMsg({
+          role: "tool",
+          content: normalizeHermesContent(mr.content).slice(0, MAX_TEXT2),
+          toolCallId: mr.tool_call_id || null,
+          timestamp: ts
+        })
+      );
+      continue;
     }
-    if (messages.length === 0) continue;
-    out.push(
-      buildSession({
-        id: row.id,
-        source: opts.source,
-        title: row.display_name || row.title,
-        model: row.model,
-        projectPath: row.cwd,
-        startedAt: isoFromSecsOrMs(row.started_at),
-        messages
-      })
-    );
+    const thinking = typeof mr.reasoning_content === "string" ? mr.reasoning_content : "";
+    if (thinking.trim()) {
+      messages.push(makeMsg({ role: "assistant", content: "", thinking, timestamp: ts }));
+    }
+    const content = normalizeHermesContent(mr.content).slice(0, MAX_TEXT2);
+    if (content) messages.push(makeMsg({ role, content, timestamp: ts }));
+    let calls = [];
+    if (typeof mr.tool_calls === "string" && mr.tool_calls) {
+      const parsed = safeJsonParse(mr.tool_calls);
+      if (Array.isArray(parsed)) calls = parsed;
+    }
+    for (const tc of parseHermesToolCalls(calls)) {
+      messages.push(
+        makeMsg({
+          role: "assistant",
+          content: "",
+          toolName: tc.name,
+          toolInput: tc.input,
+          toolCallId: tc.id ?? null,
+          timestamp: ts
+        })
+      );
+    }
   }
-  return out;
+  if (messages.length === 0) return null;
+  return buildSession({
+    id: row.id,
+    source: opts.source,
+    title: row.display_name || row.title,
+    model: row.model,
+    projectPath: row.cwd,
+    startedAt: isoFromSecsOrMs(row.started_at),
+    messages
+  });
 }
 function parseHermesToolCalls(raw) {
   if (!Array.isArray(raw)) return [];
@@ -1196,6 +1226,7 @@ export {
   estTokens,
   extractTokens,
   flattenContent,
+  hermesSessionFromDb,
   hermesSessionsFromDb,
   isoFromMs,
   isoFromSecsOrMs,
@@ -1205,6 +1236,7 @@ export {
   nirRoleSchema,
   nirSessionSchema,
   nirTokenUsageSchema,
+  opencodeSessionFromDb,
   opencodeSessionsFromDb,
   parseAntigravityTranscript,
   parseChatTranscript,

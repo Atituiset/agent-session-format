@@ -1,6 +1,20 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { nirSessionSchema, opencodeSessionsFromDb } from "../src/index";
+import { nirSessionSchema, opencodeSessionFromDb, opencodeSessionsFromDb } from "../src/index";
+
+/** Records every (sql, params) call so tests can assert query scoping. */
+function recording(db: DatabaseSync) {
+  const calls: { sql: string; params: unknown[] }[] = [];
+  const wrapped = {
+    prepare: (sql: string) => ({
+      all: (...params: unknown[]) => {
+        calls.push({ sql, params });
+        return db.prepare(sql).all(...(params as never[])) as unknown[];
+      },
+    }),
+  };
+  return { calls, db: wrapped };
+}
 
 function makeDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
@@ -102,5 +116,54 @@ describe("opencode sqlite → NIR", () => {
     const sessions = await opencodeSessionsFromDb(asyncDb, { source: "opencode" });
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.id).toBe("s1");
+  });
+});
+
+describe("opencodeSessionFromDb (single session)", () => {
+  function seedTwoSessions(): DatabaseSync {
+    const db = makeDb();
+    seed(db); // session "s1"
+    db.prepare("INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+      "s2", null, "/other", "Second", "0.6.3", 0, 0, 0, 1735689800000, 1735689900000, "glm5", 0.001, 5, 6,
+    );
+    db.prepare("INSERT INTO message VALUES (?,?,?,?)").run("m9", "s2", JSON.stringify({ role: "user" }), 1735689800000);
+    db.prepare("INSERT INTO part VALUES (?,?,?,?)").run("pt9", "m9", JSON.stringify({ id: "pt9", type: "text", text: "second session here" }), 1735689800000);
+    return db;
+  }
+
+  it("returns NIR identical to the whole-DB variant's entry for that session", async () => {
+    const db = seedTwoSessions();
+    const all = await opencodeSessionsFromDb(db, { source: "opencode" });
+    expect(all.map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+    for (const id of ["s1", "s2"]) {
+      const single = await opencodeSessionFromDb(db, id, { source: "opencode" });
+      expect(single).not.toBeNull();
+      expect(nirSessionSchema.safeParse(single).success).toBe(true);
+      expect(single).toEqual(all.find((s) => s.id === id));
+    }
+  });
+
+  it("scopes every query to the requested session", async () => {
+    const db = seedTwoSessions();
+    const rec = recording(db);
+    const single = await opencodeSessionFromDb(rec.db, "s2", { source: "opencode" });
+    expect(single?.id).toBe("s2");
+    // The session row lookup filters on s.id.
+    const sessionQuery = rec.calls.find((c) => c.sql.includes("FROM session"));
+    expect(sessionQuery?.sql).toContain("WHERE s.id = ?");
+    expect(sessionQuery?.params).toEqual(["s2"]);
+    // Every message query targets only s2; no parameter ever references s1.
+    const messageQueries = rec.calls.filter((c) => c.sql.includes("FROM message"));
+    expect(messageQueries.length).toBeGreaterThan(0);
+    expect(messageQueries.every((c) => c.params.length === 1 && c.params[0] === "s2")).toBe(true);
+    expect(rec.calls.flatMap((c) => c.params)).not.toContain("s1");
+    // Part queries only touch s2's message ids.
+    const partParams = rec.calls.filter((c) => c.sql.includes("FROM part")).flatMap((c) => c.params);
+    expect(partParams).toEqual(["m9"]);
+  });
+
+  it("returns null for an unknown session id", async () => {
+    const db = seedTwoSessions();
+    expect(await opencodeSessionFromDb(db, "nope", { source: "opencode" })).toBeNull();
   });
 });
