@@ -6,7 +6,7 @@
   "author": "Atituiset",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Atituiset/agent-session-format.git"
+    "url": "git+https://github.com/Atituiset/agent-session-format.git"
   },
   "homepage": "https://github.com/Atituiset/agent-session-format",
   "keywords": [
