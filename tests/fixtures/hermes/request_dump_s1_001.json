@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "request": {
+    "body": {
+      "messages": [
+        { "role": "system", "content": "You are Hermes." },
+        { "role": "user", "content": "hi" },
+        {
+          "role": "assistant",
+          "content": "yo",
+          "tool_calls": [
+            { "id": "call_1", "function": { "name": "Read", "arguments": "{\"path\":\"README.md\"}" } }
+          ]
+        },
+        { "role": "tool", "content": "# README" }
+      ]
+    }
+  }
+}

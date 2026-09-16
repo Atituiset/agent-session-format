@@ -1,0 +1,4 @@
+{"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>add a health check endpoint</USER_REQUEST>","created_at":"2026-01-01T00:00:00Z"}
+{"source":"MODEL","type":"PLANNER_RESPONSE","content":"I'll add the endpoint now.","tool_calls":[{"name":"write_file","args":{"path":"src/health.ts"}}],"created_at":"2026-01-01T00:00:01Z"}
+{"source":"MODEL","type":"RUN_COMMAND","command":"curl localhost:3000/health","output":"{\"ok\":true}","created_at":"2026-01-01T00:00:02Z"}
+{"source":"MODEL","type":"VIEW_FILE","path":"src/health.ts","created_at":"2026-01-01T00:00:03Z"}

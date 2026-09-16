@@ -1,0 +1,49 @@
+{
+  "name": "agent-session-format",
+  "version": "0.1.0",
+  "description": "Environment-agnostic parsers that normalize AI coding-agent session transcripts into one zod-validated intermediate representation (NIR).",
+  "license": "MIT",
+  "author": "Atituiset",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Atituiset/agent-session-format.git"
+  },
+  "homepage": "https://github.com/Atituiset/agent-session-format",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "kimi-code",
+    "opencode",
+    "hermes",
+    "antigravity",
+    "ai-agents",
+    "session-transcripts"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "prepare": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
