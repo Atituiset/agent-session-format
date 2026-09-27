@@ -141,10 +141,24 @@ interface ParseOptions {
     id?: string;
     /** Origin file path; only used to derive the id and (for Claude Code) the project slug. */
     filePath?: string;
+    /** Swimlane tags applied to every parsed message — pass these when parsing a
+     * subagent transcript file so its messages land in their own lane. */
+    agent?: string;
+    agentLabel?: string;
 }
 /**
  * Parse one Claude Code `.jsonl` transcript into a NIR session.
  * Pure: content in, NIR out. Returns null when no messages parse.
+ *
+ * Sidechain (subagent) rows are parsed into their own swimlane instead of
+ * dropped: the lane id is the spawning `Task` tool_use id when it can be
+ * resolved from the parent chain, and `agentLabel` carries the Task
+ * description. Rows flagged `isMeta` (command caveats etc.) are skipped;
+ * compaction summary rows parse as user messages. Both are counted in
+ * `rawMeta`. Token usage is deduplicated by `message.id` — Claude repeats
+ * rows (with the full usage object) when a streamed message is retried —
+ * and accumulated per swimlane: `rawMeta.tokensByAgent` holds the per-lane
+ * breakdown, `session.tokens` the grand total.
  */
 declare function parseClaudeCodeTranscript(text: string, opts: ParseOptions): NirSession | null;
 declare function decodeClaudeProjectSlug(filePath: string): string | null;
@@ -152,6 +166,8 @@ declare function decodeClaudeProjectSlug(filePath: string): string | null;
 interface KimiWireOptions extends ParseOptions {
     /** Agent lane name; overrides the `agents/<name>` path segment when set. */
     agent?: string;
+    /** Human-readable lane label recorded as `agentLabel` on subagent messages. */
+    agentLabel?: string;
 }
 /**
  * Parse a Codex CLI rollout `.jsonl` (also used by DeepSeek and other

@@ -2,8 +2,6 @@ import type { NirMessage, NirSession } from "../schema.js";
 import type { SqliteDb, SqliteStatement } from "../sqlite.js";
 import { buildSession, isoFromSecsOrMs, makeMsg, safeJsonParse } from "../util.js";
 
-const MAX_TEXT = 30_000;
-
 interface HermesToolCall {
   id?: string;
   function?: { name?: string; arguments?: string };
@@ -38,7 +36,7 @@ export function parseHermesDump(
     const msg = rm as { role?: string; content?: unknown; tool_calls?: HermesToolCall[] };
     const role = msg.role ?? "";
     if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") continue;
-    const content = normalizeHermesContent(msg.content).slice(0, MAX_TEXT);
+    const content = normalizeHermesContent(msg.content);
     if (role === "tool") {
       messages.push(makeMsg({ role: "tool", content, timestamp }));
       continue;
@@ -151,7 +149,7 @@ async function mapSessionRow(
       messages.push(
         makeMsg({
           role: "tool",
-          content: normalizeHermesContent(mr.content).slice(0, MAX_TEXT),
+          content: normalizeHermesContent(mr.content),
           toolCallId: mr.tool_call_id || null,
           timestamp: ts,
         }),
@@ -162,7 +160,7 @@ async function mapSessionRow(
     if (thinking.trim()) {
       messages.push(makeMsg({ role: "assistant", content: "", thinking, timestamp: ts }));
     }
-    const content = normalizeHermesContent(mr.content).slice(0, MAX_TEXT);
+    const content = normalizeHermesContent(mr.content);
     if (content) messages.push(makeMsg({ role, content, timestamp: ts }));
     let calls: HermesToolCall[] = [];
     if (typeof mr.tool_calls === "string" && mr.tool_calls) {

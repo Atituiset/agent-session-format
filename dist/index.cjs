@@ -214,7 +214,6 @@ function basenameNoExt(filePath, ext) {
 }
 
 // src/parsers/claude-code.ts
-var MAX_TOOL_CONTENT = 2e4;
 function parseClaudeCodeTranscript(text, opts) {
   const id = opts.id ?? (opts.filePath ? basenameNoExt(opts.filePath, ".jsonl") : void 0);
   if (!id) throw new Error("parseClaudeCodeTranscript: opts.id or opts.filePath is required");
@@ -225,7 +224,14 @@ function parseClaudeCodeTranscript(text, opts) {
   let title = null;
   let cwd = slugProject;
   let sidechainCount = 0;
-  const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  let metaCount = 0;
+  let compactionCount = 0;
+  const tokensByLane = /* @__PURE__ */ new Map();
+  const seenUsageIds = /* @__PURE__ */ new Set();
+  const seenContent = /* @__PURE__ */ new Set();
+  const mainLane = opts.agent !== void 0 ? { agent: opts.agent, agentLabel: opts.agentLabel ?? null } : null;
+  const rows = [];
+  const byUuid = /* @__PURE__ */ new Map();
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let row;
@@ -234,12 +240,21 @@ function parseClaudeCodeTranscript(text, opts) {
     } catch {
       continue;
     }
-    if (row.isSidechain === true) {
-      sidechainCount++;
+    rows.push(row);
+    if (typeof row.uuid === "string") byUuid.set(row.uuid, row);
+  }
+  const laneCache = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (row.isMeta === true) {
+      metaCount++;
       continue;
     }
     if (row.type === "ai-title" && typeof row.aiTitle === "string") {
       title = row.aiTitle;
+      continue;
+    }
+    if (row.type === "summary" && typeof row.summary === "string") {
+      if (title === null) title = row.summary;
       continue;
     }
     if (row.type !== "user" && row.type !== "assistant") continue;
@@ -249,20 +264,37 @@ function parseClaudeCodeTranscript(text, opts) {
     const role = row.type;
     if (typeof row.version === "string") sourceVersion = row.version;
     if (typeof row.cwd === "string") cwd = row.cwd;
+    if (row.isCompactSummary === true) compactionCount++;
+    const sidechain = row.isSidechain === true;
+    if (sidechain) sidechainCount++;
+    const lane = sidechain ? sidechainLane(row, byUuid, laneCache, opts) : mainLane ?? { agent: null, agentLabel: null };
+    const msgId = typeof message.id === "string" ? message.id : null;
     if (role === "assistant") {
       if (typeof message.model === "string") model = message.model;
       const usage = extractTokens(message.usage);
-      if (usage) {
-        tokens.input += usage.input;
-        tokens.output += usage.output;
+      if (usage && (!msgId || !seenUsageIds.has(msgId))) {
+        if (msgId) seenUsageIds.add(msgId);
+        const key = lane.agent ?? "main";
+        let acc = tokensByLane.get(key);
+        if (!acc) {
+          acc = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+          tokensByLane.set(key, acc);
+        }
+        acc.input += usage.input;
+        acc.output += usage.output;
         const u = message.usage;
-        tokens.cacheRead += num(u.cache_read_input_tokens);
-        tokens.cacheWrite += num(u.cache_creation_input_tokens);
+        acc.cacheRead += num(u.cache_read_input_tokens);
+        acc.cacheWrite += num(u.cache_creation_input_tokens);
       }
+    }
+    const contentKey = msgId ? `${msgId}:${JSON.stringify(message.content ?? null)}` : null;
+    if (contentKey) {
+      if (seenContent.has(contentKey)) continue;
+      seenContent.add(contentKey);
     }
     const content = message.content;
     if (typeof content === "string") {
-      if (content.trim()) messages.push(makeMsg({ role, content, timestamp: ts, model }));
+      if (content.trim()) messages.push(makeMsg({ role, content, timestamp: ts, model, ...lane }));
       continue;
     }
     const blocks = Array.isArray(content) ? content : content && typeof content === "object" ? [content] : [];
@@ -270,11 +302,11 @@ function parseClaudeCodeTranscript(text, opts) {
       if (!block || typeof block !== "object") continue;
       const b = block;
       if (b.type === "text" && typeof b.text === "string") {
-        if (b.text.trim()) messages.push(makeMsg({ role, content: b.text, timestamp: ts, model }));
+        if (b.text.trim()) messages.push(makeMsg({ role, content: b.text, timestamp: ts, model, ...lane }));
       } else if (b.type === "thinking" && typeof b.thinking === "string") {
         if (b.thinking.trim()) {
           messages.push(
-            makeMsg({ role: "assistant", content: "", thinking: b.thinking, timestamp: ts, model })
+            makeMsg({ role: "assistant", content: "", thinking: b.thinking, timestamp: ts, model, ...lane })
           );
         }
       } else if (b.type === "tool_use") {
@@ -286,7 +318,8 @@ function parseClaudeCodeTranscript(text, opts) {
             toolInput: b.input ?? null,
             toolCallId: typeof b.id === "string" ? b.id : null,
             timestamp: ts,
-            model
+            model,
+            ...lane
           })
         );
       } else if (b.type === "tool_result") {
@@ -301,20 +334,29 @@ function parseClaudeCodeTranscript(text, opts) {
         messages.push(
           makeMsg({
             role: "tool",
-            content: text2.slice(0, MAX_TOOL_CONTENT),
+            content: text2,
             toolCallId: typeof b.tool_use_id === "string" ? b.tool_use_id : null,
-            timestamp: ts
+            timestamp: ts,
+            ...lane
           })
         );
       }
     }
   }
   if (messages.length === 0) return null;
-  const hasTokens = tokens.input + tokens.output > 0;
-  if (hasTokens) {
-    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-    if (lastAssistant) lastAssistant.tokens = { ...tokens };
+  const grand = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const tokensByAgent = {};
+  for (const [lane, t] of tokensByLane) {
+    if (t.input + t.output === 0) continue;
+    grand.input += t.input;
+    grand.output += t.output;
+    grand.cacheRead += t.cacheRead;
+    grand.cacheWrite += t.cacheWrite;
+    tokensByAgent[lane] = { ...t };
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && (m.agent ?? "main") === lane);
+    if (lastAssistant) lastAssistant.tokens = { ...t };
   }
+  const hasTokens = Object.keys(tokensByAgent).length > 0;
   return buildSession({
     id,
     source: opts.source,
@@ -323,12 +365,58 @@ function parseClaudeCodeTranscript(text, opts) {
     model,
     projectPath: cwd,
     messages,
-    ...hasTokens ? { tokens: { ...tokens } } : {},
+    ...hasTokens ? { tokens: grand } : {},
     rawMeta: {
       slugProject,
-      ...sidechainCount > 0 ? { sidechainMessages: sidechainCount } : {}
+      ...sidechainCount > 0 ? { sidechainMessages: sidechainCount } : {},
+      ...metaCount > 0 ? { metaMessages: metaCount } : {},
+      ...compactionCount > 0 ? { compactions: compactionCount } : {},
+      ...hasTokens ? { tokensByAgent } : {}
     }
   });
+}
+function sidechainLane(row, byUuid, cache, opts) {
+  let root = row;
+  const seen = /* @__PURE__ */ new Set();
+  for (; ; ) {
+    const parentId = typeof root.parentUuid === "string" ? root.parentUuid : null;
+    const parent = parentId ? byUuid.get(parentId) : void 0;
+    if (!parentId || !parent || parent.isSidechain !== true || seen.has(parentId)) break;
+    seen.add(parentId);
+    root = parent;
+  }
+  const rootKey = typeof root.uuid === "string" ? root.uuid : "";
+  const cached = cache.get(rootKey);
+  if (cached) return cached;
+  let lane = {
+    agent: opts.agent ?? (rootKey ? `sidechain-${rootKey}` : "sidechain"),
+    agentLabel: opts.agentLabel ?? null
+  };
+  const anchorId = typeof root.parentUuid === "string" ? root.parentUuid : null;
+  const anchor = anchorId ? byUuid.get(anchorId) : void 0;
+  const task = anchor ? findTaskCall(anchor) : null;
+  if (task) {
+    lane = { agent: task.id ?? lane.agent, agentLabel: task.label ?? lane.agentLabel };
+  }
+  cache.set(rootKey, lane);
+  return lane;
+}
+function findTaskCall(anchorRow) {
+  const message = anchorRow.message;
+  const content = message?.content;
+  const blocks = Array.isArray(content) ? content : content && typeof content === "object" ? [content] : [];
+  let fallback = null;
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") continue;
+    const b = block;
+    if (b.type !== "tool_use") continue;
+    const input = b.input ?? {};
+    const label = typeof input.description === "string" ? input.description : typeof input.subagent_type === "string" ? input.subagent_type : typeof b.name === "string" ? b.name : null;
+    const entry = { id: typeof b.id === "string" ? b.id : null, label };
+    if (b.name === "Task") return entry;
+    fallback ??= entry;
+  }
+  return fallback;
 }
 function decodeClaudeProjectSlug(filePath) {
   const dir = filePath.split("/").slice(0, -1).pop();
@@ -346,7 +434,6 @@ function num(v) {
 }
 
 // src/parsers/codex-family.ts
-var MAX_TOOL_CONTENT2 = 2e4;
 function parseCodexRollout(text, opts) {
   let id = opts.id ?? (opts.filePath ? basenameNoExt(opts.filePath, ".jsonl") : void 0);
   let projectPath = null;
@@ -422,7 +509,7 @@ function parseCodexRollout(text, opts) {
         collectPatchFiles(rawArgs, patchFiles);
       }
     } else if (pt === "function_call_output" || pt === "custom_tool_call_output") {
-      const output = typeof p.output === "string" ? p.output.slice(0, MAX_TOOL_CONTENT2) : JSON.stringify(p.output ?? null);
+      const output = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? null);
       messages.push(
         makeMsg({
           role: "tool",
@@ -465,7 +552,7 @@ function parseKimiWire(text, opts) {
   const messages = [];
   const tokenTotals = { input: 0, output: 0 };
   let durationMs;
-  const lane = agentName === "main" ? {} : { agent: agentName };
+  const lane = agentName === "main" ? {} : { agent: agentName, ...opts.agentLabel ? { agentLabel: opts.agentLabel } : {} };
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let row;
@@ -543,7 +630,7 @@ function parseKimiWire(text, opts) {
           messages.push(
             makeMsg({
               role: "tool",
-              content: extractToolResultText(e.result).slice(0, MAX_TOOL_CONTENT2),
+              content: extractToolResultText(e.result),
               toolCallId: typeof e.toolCallId === "string" ? e.toolCallId : null,
               timestamp: ts,
               ...lane
@@ -617,7 +704,7 @@ function parseSessionJsonDocument(text, opts) {
       messages.push(
         makeMsg({
           role: "tool",
-          content: content.slice(0, MAX_TOOL_CONTENT2),
+          content,
           toolCallId: typeof m.tool_call_id === "string" ? m.tool_call_id : null,
           timestamp: ts
         })
@@ -655,7 +742,7 @@ function parseSessionJsonDocument(text, opts) {
           messages.push(
             makeMsg({
               role: "tool",
-              content: out.slice(0, MAX_TOOL_CONTENT2),
+              content: out,
               toolCallId: typeof b.tool_use_id === "string" ? b.tool_use_id : null,
               timestamp: ts
             })
@@ -722,7 +809,6 @@ function firstString(obj, keys) {
 }
 
 // src/parsers/opencode.ts
-var MAX_TEXT = 3e4;
 var SESSION_COLUMNS = `s.id, s.directory, s.title, s.version, s.summary_additions, s.summary_deletions,
        s.summary_files, s.time_created, s.time_updated, s.model, s.cost,
        s.tokens_input, s.tokens_output, p.worktree`;
@@ -804,7 +890,7 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
           messages.push(
             makeMsg({
               role: "tool",
-              content: output.slice(0, MAX_TEXT),
+              content: output,
               toolName: pd.tool,
               toolCallId: callId,
               timestamp: ts
@@ -830,7 +916,7 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
         }
       }
     }
-    textContent = textContent.trim().slice(0, MAX_TEXT);
+    textContent = textContent.trim();
     if (!textContent) continue;
     const msg = makeMsg({ role, content: textContent, timestamp: ts, model: mModel });
     if (tokensRaw) msg.tokens = { ...tokensRaw, cacheRead: 0, cacheWrite: 0 };
@@ -894,7 +980,6 @@ function extractOpencodeTokens(v) {
 }
 
 // src/parsers/antigravity.ts
-var MAX_CONTENT = 3e4;
 function parseAntigravityTranscript(text, opts) {
   const id = opts.id ?? (opts.filePath?.includes("/brain/") ? opts.filePath.split("/brain/")[1]?.split("/")[0] ?? opts.filePath : opts.filePath);
   if (!id) throw new Error("parseAntigravityTranscript: opts.id or opts.filePath is required");
@@ -909,7 +994,7 @@ function parseAntigravityTranscript(text, opts) {
     }
     const type = row.type;
     const ts = typeof row.created_at === "string" ? Number.isNaN(new Date(row.created_at).getTime()) ? row.created_at : new Date(row.created_at).toISOString() : null;
-    const content = normalizeContent(row.content).slice(0, MAX_CONTENT);
+    const content = normalizeContent(row.content);
     switch (type) {
       case "USER_INPUT": {
         const cleaned = extractUserRequest(content);
@@ -973,7 +1058,7 @@ function parseAntigravityTranscript(text, opts) {
           messages.push(
             makeMsg({
               role: "tool",
-              content: output.slice(0, MAX_CONTENT),
+              content: output,
               toolName: "bash",
               timestamp: ts
             })
@@ -1040,7 +1125,6 @@ function extractTarget(row) {
 }
 
 // src/parsers/hermes.ts
-var MAX_TEXT2 = 3e4;
 function parseHermesDump(text, opts) {
   let data;
   try {
@@ -1058,7 +1142,7 @@ function parseHermesDump(text, opts) {
     const msg = rm;
     const role = msg.role ?? "";
     if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") continue;
-    const content = normalizeHermesContent(msg.content).slice(0, MAX_TEXT2);
+    const content = normalizeHermesContent(msg.content);
     if (role === "tool") {
       messages.push(makeMsg({ role: "tool", content, timestamp }));
       continue;
@@ -1121,7 +1205,7 @@ async function mapSessionRow2(row, msgStmt, opts) {
       messages.push(
         makeMsg({
           role: "tool",
-          content: normalizeHermesContent(mr.content).slice(0, MAX_TEXT2),
+          content: normalizeHermesContent(mr.content),
           toolCallId: mr.tool_call_id || null,
           timestamp: ts
         })
@@ -1132,7 +1216,7 @@ async function mapSessionRow2(row, msgStmt, opts) {
     if (thinking.trim()) {
       messages.push(makeMsg({ role: "assistant", content: "", thinking, timestamp: ts }));
     }
-    const content = normalizeHermesContent(mr.content).slice(0, MAX_TEXT2);
+    const content = normalizeHermesContent(mr.content);
     if (content) messages.push(makeMsg({ role, content, timestamp: ts }));
     let calls = [];
     if (typeof mr.tool_calls === "string" && mr.tool_calls) {

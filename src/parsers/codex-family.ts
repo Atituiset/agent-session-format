@@ -12,11 +12,11 @@ import {
 } from "../util.js";
 import type { ParseOptions } from "./claude-code.js";
 
-const MAX_TOOL_CONTENT = 20_000;
-
 export interface KimiWireOptions extends ParseOptions {
   /** Agent lane name; overrides the `agents/<name>` path segment when set. */
   agent?: string;
+  /** Human-readable lane label recorded as `agentLabel` on subagent messages. */
+  agentLabel?: string;
 }
 
 /**
@@ -113,10 +113,7 @@ export function parseCodexRollout(text: string, opts: ParseOptions): NirSession 
         collectPatchFiles(rawArgs, patchFiles);
       }
     } else if (pt === "function_call_output" || pt === "custom_tool_call_output") {
-      const output =
-        typeof p.output === "string"
-          ? p.output.slice(0, MAX_TOOL_CONTENT)
-          : JSON.stringify(p.output ?? null);
+      const output = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? null);
       messages.push(
         makeMsg({
           role: "tool",
@@ -172,7 +169,10 @@ export function parseKimiWire(text: string, opts: KimiWireOptions): NirSession |
   const messages: NirMessage[] = [];
   const tokenTotals = { input: 0, output: 0 };
   let durationMs: number | undefined;
-  const lane = agentName === "main" ? {} : { agent: agentName };
+  const lane =
+    agentName === "main"
+      ? {}
+      : { agent: agentName, ...(opts.agentLabel ? { agentLabel: opts.agentLabel } : {}) };
 
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -254,7 +254,7 @@ export function parseKimiWire(text: string, opts: KimiWireOptions): NirSession |
           messages.push(
             makeMsg({
               role: "tool",
-              content: extractToolResultText(e.result).slice(0, MAX_TOOL_CONTENT),
+              content: extractToolResultText(e.result),
               toolCallId: typeof e.toolCallId === "string" ? e.toolCallId : null,
               timestamp: ts,
               ...lane,
@@ -345,7 +345,7 @@ export function parseSessionJsonDocument(text: string, opts: ParseOptions): NirS
       messages.push(
         makeMsg({
           role: "tool",
-          content: content.slice(0, MAX_TOOL_CONTENT),
+          content,
           toolCallId: typeof m.tool_call_id === "string" ? m.tool_call_id : null,
           timestamp: ts,
         }),
@@ -393,7 +393,7 @@ export function parseSessionJsonDocument(text: string, opts: ParseOptions): NirS
           messages.push(
             makeMsg({
               role: "tool",
-              content: out.slice(0, MAX_TOOL_CONTENT),
+              content: out,
               toolCallId: typeof b.tool_use_id === "string" ? b.tool_use_id : null,
               timestamp: ts,
             }),

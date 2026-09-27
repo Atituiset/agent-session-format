@@ -2,8 +2,6 @@ import type { NirMessage, NirSession } from "../schema.js";
 import { buildSession, makeMsg } from "../util.js";
 import type { ParseOptions } from "./claude-code.js";
 
-const MAX_CONTENT = 30_000;
-
 /**
  * Parse one Antigravity (Gemini CLI) `transcript.jsonl`. Pure: content in,
  * NIR out. Returns null when no messages parse.
@@ -35,7 +33,7 @@ export function parseAntigravityTranscript(text: string, opts: ParseOptions): Ni
             ? row.created_at
             : new Date(row.created_at).toISOString())
         : null;
-    const content = normalizeContent(row.content).slice(0, MAX_CONTENT);
+    const content = normalizeContent(row.content);
 
     switch (type) {
       case "USER_INPUT": {
@@ -100,7 +98,7 @@ export function parseAntigravityTranscript(text: string, opts: ParseOptions): Ni
           messages.push(
             makeMsg({
               role: "tool",
-              content: output.slice(0, MAX_CONTENT),
+              content: output,
               toolName: "bash",
               timestamp: ts,
             }),

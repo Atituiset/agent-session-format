@@ -2,8 +2,6 @@ import type { NirMessage, NirSession } from "../schema.js";
 import type { SqliteDb, SqliteStatement } from "../sqlite.js";
 import { buildSession, isoFromMs, makeMsg } from "../util.js";
 
-const MAX_TEXT = 30_000;
-
 export interface OpencodeOptions {
   /** Tool id recorded as `session.source` (e.g. "opencode"). */
   source: string;
@@ -144,7 +142,7 @@ async function mapSessionRow(
           messages.push(
             makeMsg({
               role: "tool",
-              content: output.slice(0, MAX_TEXT),
+              content: output,
               toolName: pd.tool,
               toolCallId: callId,
               timestamp: ts,
@@ -170,7 +168,7 @@ async function mapSessionRow(
         }
       }
     }
-    textContent = textContent.trim().slice(0, MAX_TEXT);
+    textContent = textContent.trim();
     if (!textContent) continue;
     const msg = makeMsg({ role, content: textContent, timestamp: ts, model: mModel });
     if (tokensRaw) msg.tokens = { ...tokensRaw, cacheRead: 0, cacheWrite: 0 };

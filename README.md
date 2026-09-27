@@ -81,9 +81,29 @@ missing *options* (no derivable session id).
   `model`, `tokens`, and tool-call detail: `toolName`, `toolInput`,
   `toolCallId` (correlates an assistant tool call with its `role: "tool"`
   result message), plus `agent` / `agentLabel` swimlane tags for subagent
-  lanes.
-- `rawMeta` — source-specific extras (patch file lists, sidechain counts,
-  estimated tokens, …).
+  lanes. Parsers never truncate message, thinking, or tool-result content.
+- `rawMeta` — source-specific extras (patch file lists, sidechain/meta/
+  compaction counts, estimated tokens, …).
+
+## Claude Code specifics
+
+- **Subagent lanes**: `isSidechain` rows parse into their own swimlane instead
+  of being dropped. The lane `agent` is the spawning `Task` tool_use id
+  (resolvable through the `parentUuid` chain) and `agentLabel` its
+  description; unresolvable roots fall back to `sidechain-<rootUuid>`.
+  Separate subagent transcript files can be parsed with
+  `parseClaudeCodeTranscript(text, { agent, agentLabel, ... })` to tag every
+  message with that lane.
+- **Tokens**: usage is deduplicated by `message.id` — Claude repeats rows with
+  the full usage object when a streamed message is retried, and naive summing
+  double-counts. Usage is accumulated per swimlane: `rawMeta.tokensByAgent`
+  holds the per-lane breakdown (`main` plus one entry per subagent lane),
+  `session.tokens` the grand total, and each lane's last assistant message
+  carries that lane's `tokens`.
+- **Noise rows**: `isMeta` rows (local-command caveats) are skipped and
+  counted in `rawMeta.metaMessages`; compaction summaries parse as user
+  messages and are counted in `rawMeta.compactions`; `type: "summary"` rows
+  provide the title fallback after `ai-title`.
 
 ## Injected SQLite (opencode, hermes state.db)
 
