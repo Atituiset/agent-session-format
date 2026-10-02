@@ -474,6 +474,45 @@ function num(v) {
 }
 
 // src/parsers/codex-family.ts
+function codexVerdict(output) {
+  if (output === "") return void 0;
+  const newer = /Exit code: (\d+)/.exec(output);
+  if (newer) {
+    const code = Number(newer[1]);
+    return {
+      status: code === 0 ? "success" : "error",
+      method: "derived",
+      errorText: code === 0 ? null : excerpt(output, newer.index),
+      detail: { exitCode: code, envelope: "exit_code" }
+    };
+  }
+  const older = /Process exited with code (\d+)/i.exec(output);
+  if (older) {
+    const code = Number(older[1]);
+    return {
+      status: code === 0 ? "success" : "error",
+      method: "derived",
+      errorText: code === 0 ? null : excerpt(output, older.index),
+      detail: { exitCode: code, envelope: "process_exited" }
+    };
+  }
+  const failed = /Command failed with exit code (\d+)/i.exec(output);
+  if (failed) {
+    const code = Number(failed[1]);
+    return {
+      status: "error",
+      method: "derived",
+      errorText: excerpt(output, failed.index),
+      detail: { exitCode: code, envelope: "command_failed" }
+    };
+  }
+  return void 0;
+}
+function excerpt(text, at) {
+  const start = Math.max(0, at - 40);
+  const end = Math.min(text.length, at + 120);
+  return `${start > 0 ? "\u2026" : ""}${text.slice(start, end).replace(/\s+/g, " ")}${end < text.length ? "\u2026" : ""}`;
+}
 function parseCodexRollout(text, opts) {
   let id = opts.id ?? (opts.filePath ? basenameNoExt(opts.filePath, ".jsonl") : void 0);
   let projectPath = null;
@@ -560,13 +599,15 @@ function parseCodexRollout(text, opts) {
       }
     } else if (pt === "function_call_output" || pt === "custom_tool_call_output") {
       const output = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? null);
+      const verdict = codexVerdict(output);
       messages.push(
         makeMsg({
           role: "tool",
           content: output,
           toolName: callName(messages, p.call_id),
           toolCallId: typeof p.call_id === "string" ? p.call_id : null,
-          timestamp: ts
+          timestamp: ts,
+          ...verdict ? { toolResult: verdict } : {}
         })
       );
     }
@@ -683,12 +724,15 @@ function parseKimiWire(text, opts) {
             })
           );
         } else if (e.type === "tool.result") {
+          const resultText = extractToolResultText(e.result);
+          const verdict = codexVerdict(resultText);
           messages.push(
             makeMsg({
               role: "tool",
-              content: extractToolResultText(e.result),
+              content: resultText,
               toolCallId: typeof e.toolCallId === "string" ? e.toolCallId : null,
               timestamp: ts,
+              ...verdict ? { toolResult: verdict } : {},
               ...lane
             })
           );

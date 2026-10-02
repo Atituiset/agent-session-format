@@ -224,19 +224,72 @@ describe("antigravity tool outcomes", () => {
   });
 });
 
-describe("sources with no structured verdict", () => {
-  it("codex function_call_output carries no toolResult", () => {
-    // Verified against 98 real rollout rows: the payload is exactly
-    // {type, call_id, output} — codex omits the exit code it clearly has.
-    const doc =
-      JSON.stringify({
-        type: "response_item",
-        payload: { type: "function_call_output", call_id: "c1", output: "boom" },
-      }) + "\n";
-    const s = parseCodexRollout(doc, { source: "codex", id: "s1" });
-    const result = s?.messages.find((m) => m.role === "tool");
-    expect(result).toBeDefined();
-    expect(result?.toolResult).toBeUndefined();
+describe("codex tool outcomes", () => {
+  const doc = (output: string) =>
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: "c1", output },
+    }) + "\n";
+
+  it("reads the newer 'Exit code: N' envelope", () => {
+    const s = parseCodexRollout(doc("Exit code: 0\nWall time: 0.3 seconds\nOutput:\nSuccess. Updated book.toml"), {
+      source: "codex",
+      id: "s1",
+    });
+    const r = s?.messages.find((m) => m.role === "tool");
+    expect(r?.toolResult).toMatchObject({ status: "success", method: "derived" });
+    expect(r?.toolResult?.detail.exitCode).toBe(0);
+    expect(r?.toolResult?.detail.envelope).toBe("exit_code");
+  });
+
+  it("reads a non-zero 'Exit code' as an error and keeps evidence", () => {
+    const s = parseCodexRollout(doc("Exit code: 2\nWall time: 0.1 seconds\nOutput:\nboom"), {
+      source: "codex",
+      id: "s1",
+    });
+    const r = s?.messages.find((m) => m.role === "tool");
+    expect(r?.toolResult?.status).toBe("error");
+    expect(r?.toolResult?.detail.exitCode).toBe(2);
+    expect(r?.toolResult?.errorText).toContain("Exit code: 2");
+  });
+
+  it("reads the older 'Process exited with code N' envelope", () => {
+    const s = parseCodexRollout(
+      doc("chunk-id 4d2f3\nWall time: 0.1356 seconds\nProcess exited with code 1\nOriginal token count: 340\nOutput:\ntotal 92"),
+      { source: "codex", id: "s1" },
+    );
+    const r = s?.messages.find((m) => m.role === "tool");
+    expect(r?.toolResult).toMatchObject({ status: "error", method: "derived" });
+    expect(r?.toolResult?.detail.envelope).toBe("process_exited");
+  });
+
+  it("treats 'Process exited with code 0' as success", () => {
+    const s = parseCodexRollout(
+      doc("chunk-id 4d2f3\nWall time: 0.0 seconds\nProcess exited with code 0\nOutput:\n/home/x"),
+      { source: "codex", id: "s1" },
+    );
+    expect(s?.messages.find((m) => m.role === "tool")?.toolResult?.status).toBe("success");
+  });
+
+  it("reads the npm/pnpm 'Command failed with exit code N' envelope", () => {
+    const s = parseCodexRollout(
+      doc("ELIFECYCLE\\u{2009} Command failed with exit code 1.\", output: ExecToolCallOutput { exit_code: 1"),
+      { source: "codex", id: "s1" },
+    );
+    const r = s?.messages.find((m) => m.role === "tool");
+    expect(r?.toolResult?.status).toBe("error");
+    expect(r?.toolResult?.detail.envelope).toBe("command_failed");
+  });
+
+  it("leaves plain agent output unmeasured", () => {
+    // The critical contrast: codex's envelopes are machine-written, so matching
+    // them is exact. Agent prose containing "FAILED" must stay unjudged —
+    // regexing that is what produced ~100% false positives on other harnesses.
+    const s = parseCodexRollout(doc("FAILED tests/test_x.py\nAssertionError"), {
+      source: "codex",
+      id: "s1",
+    });
+    expect(s?.messages.find((m) => m.role === "tool")?.toolResult).toBeUndefined();
   });
 });
 
