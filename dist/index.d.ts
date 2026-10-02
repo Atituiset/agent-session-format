@@ -104,10 +104,22 @@ declare function buildSession(partial: {
     messages: NirMessage[];
     rawMeta?: Record<string, unknown>;
 }): NirSession;
-declare function extractTokens(obj: unknown): {
+/**
+ * Normalize provider usage objects to NIR token usage.
+ *
+ * Semantics: `input` is FRESH (non-cached) input tokens; cached portions live
+ * in cacheRead/cacheWrite and are never double-counted into input. Providers
+ * differ: Codex/Responses `input_tokens` INCLUDES the cached part (subtract
+ * it), while Anthropic (`cache_read_input_tokens`) and Kimi (`inputOther` +
+ * `inputCacheRead`) report fresh input separately from cache.
+ */
+interface ExtractedTokens {
     input: number;
     output: number;
-} | undefined;
+    cacheRead: number;
+    cacheWrite: number;
+}
+declare function extractTokens(obj: unknown): ExtractedTokens | undefined;
 declare function flattenContent(content: unknown): {
     text: string;
     thinking: string;

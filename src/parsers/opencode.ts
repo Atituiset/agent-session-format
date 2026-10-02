@@ -1,6 +1,6 @@
 import type { NirMessage, NirSession } from "../schema.js";
 import type { SqliteDb, SqliteStatement } from "../sqlite.js";
-import { buildSession, isoFromMs, makeMsg } from "../util.js";
+import { buildSession, extractTokens, isoFromMs, makeMsg } from "../util.js";
 
 export interface OpencodeOptions {
   /** Tool id recorded as `session.source` (e.g. "opencode"). */
@@ -21,12 +21,32 @@ interface SessionRow {
   cost: number | null;
   tokens_input: number | null;
   tokens_output: number | null;
+  tokens_reasoning: number | null;
+  tokens_cache_read: number | null;
+  tokens_cache_write: number | null;
   worktree: string | null;
 }
 
-const SESSION_COLUMNS = `s.id, s.directory, s.title, s.version, s.summary_additions, s.summary_deletions,
+const BASE_COLUMNS = `s.id, s.directory, s.title, s.version, s.summary_additions, s.summary_deletions,
        s.summary_files, s.time_created, s.time_updated, s.model, s.cost,
-       s.tokens_input, s.tokens_output, p.worktree`;
+       s.tokens_input, s.tokens_output`;
+// Older opencode databases lack the reasoning/cache columns — detect and
+// substitute NULLs so one parser version works against every schema era.
+const TOKEN_COLUMNS = ["tokens_reasoning", "tokens_cache_read", "tokens_cache_write"] as const;
+
+async function sessionColumns(db: SqliteDb): Promise<string> {
+  let present = new Set<string>();
+  try {
+    const rows = (await db.prepare("PRAGMA table_info(session)").all()) as { name: string }[];
+    present = new Set(rows.map((r) => r.name));
+  } catch {
+    present = new Set(TOKEN_COLUMNS); // probe failed — assume modern schema
+  }
+  const extra = TOKEN_COLUMNS.map((c) =>
+    present.has(c) ? `s.${c}` : `NULL AS ${c}`,
+  ).join(", ");
+  return `${BASE_COLUMNS}, ${extra}, p.worktree`;
+}
 
 function prepareMessageStmts(db: SqliteDb): { msgStmt: SqliteStatement; partStmt: SqliteStatement } {
   return {
@@ -47,7 +67,9 @@ function prepareMessageStmts(db: SqliteDb): { msgStmt: SqliteStatement; partStmt
  */
 export async function opencodeSessionsFromDb(db: SqliteDb, opts: OpencodeOptions): Promise<NirSession[]> {
   const sessions = (await db
-    .prepare(`SELECT ${SESSION_COLUMNS} FROM session s LEFT JOIN project p ON p.id = s.project_id`)
+    .prepare(
+      `SELECT ${await sessionColumns(db)} FROM session s LEFT JOIN project p ON p.id = s.project_id`,
+    )
     .all()) as SessionRow[];
   const { msgStmt, partStmt } = prepareMessageStmts(db);
 
@@ -72,7 +94,7 @@ export async function opencodeSessionFromDb(
 ): Promise<NirSession | null> {
   const rows = (await db
     .prepare(
-      `SELECT ${SESSION_COLUMNS} FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?`,
+      `SELECT ${await sessionColumns(db)} FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?`,
     )
     .all(sessionId)) as SessionRow[];
   const row = rows[0];
@@ -109,7 +131,7 @@ async function mapSessionRow(
         ? (md.time as Record<string, unknown>).created
         : mr.time_created;
     const ts = isoFromMs(tsMs as number);
-    const tokensRaw = extractOpencodeTokens(md.tokens);
+    const tokensRaw = extractTokens(md.tokens);
 
     let textContent = "";
     const partRows = (await partStmt.all(mr.id)) as { data: string }[];
@@ -171,12 +193,23 @@ async function mapSessionRow(
     textContent = textContent.trim();
     if (!textContent) continue;
     const msg = makeMsg({ role, content: textContent, timestamp: ts, model: mModel });
-    if (tokensRaw) msg.tokens = { ...tokensRaw, cacheRead: 0, cacheWrite: 0 };
+    if (tokensRaw) msg.tokens = tokensRaw;
     messages.push(msg);
   }
 
   if (messages.length === 0) return null;
-  const hasRowTokens = !!(row.tokens_input || row.tokens_output);
+  const hasRowTokens = !!(
+    row.tokens_input ||
+    row.tokens_output ||
+    row.tokens_cache_read ||
+    row.tokens_cache_write
+  );
+  const rowTokens = {
+    input: row.tokens_input ?? 0,
+    output: (row.tokens_output ?? 0) + (row.tokens_reasoning ?? 0),
+    cacheRead: row.tokens_cache_read ?? 0,
+    cacheWrite: row.tokens_cache_write ?? 0,
+  };
   const session = buildSession({
     id: row.id,
     source: opts.source,
@@ -188,16 +221,7 @@ async function mapSessionRow(
     startedAt: isoFromMs(row.time_created),
     endedAt: isoFromMs(row.time_updated),
     messages,
-    ...(hasRowTokens
-      ? {
-          tokens: {
-            input: row.tokens_input ?? 0,
-            output: row.tokens_output ?? 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-          },
-        }
-      : {}),
+    ...(hasRowTokens ? { tokens: rowTokens } : {}),
     rawMeta: {
       title: row.title,
       cost: row.cost,
@@ -210,27 +234,9 @@ async function mapSessionRow(
   if (hasRowTokens && model) {
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
     if (lastAssistant && !lastAssistant.tokens) {
-      lastAssistant.tokens = {
-        input: row.tokens_input ?? 0,
-        output: row.tokens_output ?? 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-      };
+      lastAssistant.tokens = rowTokens;
     }
   }
   return session;
 }
 
-function extractOpencodeTokens(v: unknown): { input: number; output: number } | undefined {
-  if (!v || typeof v !== "object") return undefined;
-  const o = v as Record<string, unknown>;
-  const input = o.input ?? o.inputs;
-  const output = o.output ?? o.outputs;
-  if (typeof input === "number" || typeof output === "number") {
-    return {
-      input: typeof input === "number" ? input : 0,
-      output: typeof output === "number" ? output : 0,
-    };
-  }
-  return undefined;
-}

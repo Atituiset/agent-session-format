@@ -111,20 +111,30 @@ function extractTokens(obj) {
     }
     return 0;
   };
-  if (o.input_tokens !== void 0 || o.output_tokens !== void 0) {
+  const cacheObj = typeof o.cache === "object" && o.cache !== null ? o.cache : void 0;
+  const cacheRead = pick("cached_input_tokens", "cache_read_input_tokens", "inputCacheRead", "cacheRead") + (typeof cacheObj?.read === "number" ? cacheObj.read : 0);
+  const cacheWrite = pick("cache_write_input_tokens", "cache_creation_input_tokens", "inputCacheCreation", "cacheWrite") + (typeof cacheObj?.write === "number" ? cacheObj.write : 0);
+  if (o.input_tokens !== void 0 || o.output_tokens !== void 0 || o.prompt_tokens !== void 0 || o.completion_tokens !== void 0) {
+    const rawIn = pick("input_tokens", "prompt_tokens");
+    const inclusive = o.cached_input_tokens !== void 0 || o.cache_write_input_tokens !== void 0;
     return {
-      input: pick("input_tokens", "prompt_tokens"),
-      output: pick("output_tokens", "completion_tokens")
+      input: inclusive ? Math.max(0, rawIn - cacheRead - cacheWrite) : rawIn,
+      output: pick("output_tokens", "completion_tokens"),
+      cacheRead,
+      cacheWrite
     };
   }
-  if (o.prompt_tokens !== void 0 || o.completion_tokens !== void 0) {
+  if (o.input !== void 0 || o.output !== void 0 || o.inputOther !== void 0) {
     return {
-      input: pick("prompt_tokens", "input_tokens"),
-      output: pick("completion_tokens", "output_tokens")
+      input: pick("input", "inputs", "inputOther"),
+      // opencode reports reasoning separately; providers bill it as output.
+      output: pick("output", "outputs") + pick("reasoning"),
+      cacheRead,
+      cacheWrite
     };
   }
-  if (o.input !== void 0 || o.output !== void 0) {
-    return { input: pick("input"), output: pick("output") };
+  if (cacheRead + cacheWrite > 0) {
+    return { input: 0, output: 0, cacheRead, cacheWrite };
   }
   return void 0;
 }
@@ -387,6 +397,7 @@ function parseCodexRollout(text, opts) {
   let model = null;
   const messages = [];
   const patchFiles = /* @__PURE__ */ new Set();
+  let latestUsage;
   const pushMessage = (p, ts) => {
     const role = p.role;
     if (role !== "user" && role !== "assistant" && role !== "system") return;
@@ -416,6 +427,15 @@ function parseCodexRollout(text, opts) {
     if (row.type === "turn_context") {
       const p2 = row.payload ?? {};
       if (typeof p2.model === "string") model = p2.model;
+      continue;
+    }
+    if (row.type === "event_msg") {
+      const p2 = row.payload ?? {};
+      if (p2.type === "token_count") {
+        const info = p2.info ?? {};
+        const u = extractTokens(info.total_token_usage);
+        if (u) latestUsage = u;
+      }
       continue;
     }
     if (row.type === "message") {
@@ -469,15 +489,21 @@ function parseCodexRollout(text, opts) {
   }
   if (messages.length === 0) return null;
   if (!id) throw new Error("parseCodexRollout: opts.id, opts.filePath, or a session_meta row is required");
-  return buildSession({
+  const session = buildSession({
     id,
     source: opts.source,
     sourceVersion,
     model,
     projectPath,
     messages,
+    ...latestUsage ? { tokens: latestUsage } : {},
     rawMeta: patchFiles.size > 0 ? { patchFiles: [...patchFiles] } : {}
   });
+  if (latestUsage) {
+    const lastAssistant = [...session.messages].reverse().find((m) => m.role === "assistant");
+    if (lastAssistant) lastAssistant.tokens = latestUsage;
+  }
+  return session;
 }
 function parseKimiWire(text, opts) {
   let sessionDir = "";
@@ -496,7 +522,7 @@ function parseKimiWire(text, opts) {
   let model = null;
   let startedAtMs;
   const messages = [];
-  const tokenTotals = { input: 0, output: 0 };
+  const tokenTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let durationMs;
   const lane = agentName === "main" ? {} : { agent: agentName, ...opts.agentLabel ? { agentLabel: opts.agentLabel } : {} };
   for (const line of text.split("\n")) {
@@ -590,6 +616,8 @@ function parseKimiWire(text, opts) {
         if (u) {
           tokenTotals.input += u.input;
           tokenTotals.output += u.output;
+          tokenTotals.cacheRead += u.cacheRead;
+          tokenTotals.cacheWrite += u.cacheWrite;
         }
         break;
       }
@@ -604,7 +632,7 @@ function parseKimiWire(text, opts) {
   const rawMeta = projectHint ? { projectHint, agent: agentName } : { agent: agentName };
   if (durationMs !== void 0) rawMeta.durationMs = durationMs;
   rawMeta.estimatedTokens = messages.reduce((sum, m) => sum + estTokens(m.content), 0);
-  const hasTokens = tokenTotals.input + tokenTotals.output > 0;
+  const hasTokens = tokenTotals.input + tokenTotals.output + tokenTotals.cacheRead + tokenTotals.cacheWrite > 0;
   const session = buildSession({
     id,
     source: opts.source,
@@ -612,12 +640,12 @@ function parseKimiWire(text, opts) {
     projectPath: null,
     startedAt: isoFromSecsOrMs(startedAtMs),
     messages,
-    ...hasTokens ? { tokens: { ...tokenTotals, cacheRead: 0, cacheWrite: 0 } } : {},
+    ...hasTokens ? { tokens: { ...tokenTotals } } : {},
     rawMeta
   });
   if (hasTokens) {
     const lastAssistant = [...session.messages].reverse().find((m) => m.role === "assistant");
-    if (lastAssistant) lastAssistant.tokens = { ...tokenTotals, cacheRead: 0, cacheWrite: 0 };
+    if (lastAssistant) lastAssistant.tokens = { ...tokenTotals };
   }
   return session;
 }
@@ -755,9 +783,23 @@ function firstString(obj, keys) {
 }
 
 // src/parsers/opencode.ts
-var SESSION_COLUMNS = `s.id, s.directory, s.title, s.version, s.summary_additions, s.summary_deletions,
+var BASE_COLUMNS = `s.id, s.directory, s.title, s.version, s.summary_additions, s.summary_deletions,
        s.summary_files, s.time_created, s.time_updated, s.model, s.cost,
-       s.tokens_input, s.tokens_output, p.worktree`;
+       s.tokens_input, s.tokens_output`;
+var TOKEN_COLUMNS = ["tokens_reasoning", "tokens_cache_read", "tokens_cache_write"];
+async function sessionColumns(db) {
+  let present = /* @__PURE__ */ new Set();
+  try {
+    const rows = await db.prepare("PRAGMA table_info(session)").all();
+    present = new Set(rows.map((r) => r.name));
+  } catch {
+    present = new Set(TOKEN_COLUMNS);
+  }
+  const extra = TOKEN_COLUMNS.map(
+    (c) => present.has(c) ? `s.${c}` : `NULL AS ${c}`
+  ).join(", ");
+  return `${BASE_COLUMNS}, ${extra}, p.worktree`;
+}
 function prepareMessageStmts(db) {
   return {
     msgStmt: db.prepare(
@@ -767,7 +809,9 @@ function prepareMessageStmts(db) {
   };
 }
 async function opencodeSessionsFromDb(db, opts) {
-  const sessions = await db.prepare(`SELECT ${SESSION_COLUMNS} FROM session s LEFT JOIN project p ON p.id = s.project_id`).all();
+  const sessions = await db.prepare(
+    `SELECT ${await sessionColumns(db)} FROM session s LEFT JOIN project p ON p.id = s.project_id`
+  ).all();
   const { msgStmt, partStmt } = prepareMessageStmts(db);
   const out = [];
   for (const row of sessions) {
@@ -778,7 +822,7 @@ async function opencodeSessionsFromDb(db, opts) {
 }
 async function opencodeSessionFromDb(db, sessionId, opts) {
   const rows = await db.prepare(
-    `SELECT ${SESSION_COLUMNS} FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?`
+    `SELECT ${await sessionColumns(db)} FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?`
   ).all(sessionId);
   const row = rows[0];
   if (!row) return null;
@@ -804,7 +848,7 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
     if (typeof mModel === "string") model = mModel;
     const tsMs = typeof md.time === "object" && md.time !== null ? md.time.created : mr.time_created;
     const ts = isoFromMs(tsMs);
-    const tokensRaw = extractOpencodeTokens(md.tokens);
+    const tokensRaw = extractTokens(md.tokens);
     let textContent = "";
     const partRows = await partStmt.all(mr.id);
     for (const pr of partRows) {
@@ -865,11 +909,17 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
     textContent = textContent.trim();
     if (!textContent) continue;
     const msg = makeMsg({ role, content: textContent, timestamp: ts, model: mModel });
-    if (tokensRaw) msg.tokens = { ...tokensRaw, cacheRead: 0, cacheWrite: 0 };
+    if (tokensRaw) msg.tokens = tokensRaw;
     messages.push(msg);
   }
   if (messages.length === 0) return null;
-  const hasRowTokens = !!(row.tokens_input || row.tokens_output);
+  const hasRowTokens = !!(row.tokens_input || row.tokens_output || row.tokens_cache_read || row.tokens_cache_write);
+  const rowTokens = {
+    input: row.tokens_input ?? 0,
+    output: (row.tokens_output ?? 0) + (row.tokens_reasoning ?? 0),
+    cacheRead: row.tokens_cache_read ?? 0,
+    cacheWrite: row.tokens_cache_write ?? 0
+  };
   const session = buildSession({
     id: row.id,
     source: opts.source,
@@ -881,14 +931,7 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
     startedAt: isoFromMs(row.time_created),
     endedAt: isoFromMs(row.time_updated),
     messages,
-    ...hasRowTokens ? {
-      tokens: {
-        input: row.tokens_input ?? 0,
-        output: row.tokens_output ?? 0,
-        cacheRead: 0,
-        cacheWrite: 0
-      }
-    } : {},
+    ...hasRowTokens ? { tokens: rowTokens } : {},
     rawMeta: {
       title: row.title,
       cost: row.cost,
@@ -901,28 +944,10 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
   if (hasRowTokens && model) {
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
     if (lastAssistant && !lastAssistant.tokens) {
-      lastAssistant.tokens = {
-        input: row.tokens_input ?? 0,
-        output: row.tokens_output ?? 0,
-        cacheRead: 0,
-        cacheWrite: 0
-      };
+      lastAssistant.tokens = rowTokens;
     }
   }
   return session;
-}
-function extractOpencodeTokens(v) {
-  if (!v || typeof v !== "object") return void 0;
-  const o = v;
-  const input = o.input ?? o.inputs;
-  const output = o.output ?? o.outputs;
-  if (typeof input === "number" || typeof output === "number") {
-    return {
-      input: typeof input === "number" ? input : 0,
-      output: typeof output === "number" ? output : 0
-    };
-  }
-  return void 0;
 }
 
 // src/parsers/antigravity.ts

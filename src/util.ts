@@ -84,7 +84,23 @@ export function buildSession(partial: {
   };
 }
 
-export function extractTokens(obj: unknown): { input: number; output: number } | undefined {
+/**
+ * Normalize provider usage objects to NIR token usage.
+ *
+ * Semantics: `input` is FRESH (non-cached) input tokens; cached portions live
+ * in cacheRead/cacheWrite and are never double-counted into input. Providers
+ * differ: Codex/Responses `input_tokens` INCLUDES the cached part (subtract
+ * it), while Anthropic (`cache_read_input_tokens`) and Kimi (`inputOther` +
+ * `inputCacheRead`) report fresh input separately from cache.
+ */
+export interface ExtractedTokens {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+export function extractTokens(obj: unknown): ExtractedTokens | undefined {
   if (typeof obj !== "object" || obj === null) return undefined;
   const o = obj as Record<string, unknown>;
   const pick = (...keys: string[]): number => {
@@ -94,20 +110,37 @@ export function extractTokens(obj: unknown): { input: number; output: number } |
     }
     return 0;
   };
-  if (o.input_tokens !== undefined || o.output_tokens !== undefined) {
+  const cacheObj =
+    typeof o.cache === "object" && o.cache !== null
+      ? (o.cache as Record<string, unknown>)
+      : undefined;
+  const cacheRead =
+    pick("cached_input_tokens", "cache_read_input_tokens", "inputCacheRead", "cacheRead") +
+    (typeof cacheObj?.read === "number" ? cacheObj.read : 0);
+  const cacheWrite =
+    pick("cache_write_input_tokens", "cache_creation_input_tokens", "inputCacheCreation", "cacheWrite") +
+    (typeof cacheObj?.write === "number" ? cacheObj.write : 0);
+  if (o.input_tokens !== undefined || o.output_tokens !== undefined || o.prompt_tokens !== undefined || o.completion_tokens !== undefined) {
+    const rawIn = pick("input_tokens", "prompt_tokens");
+    const inclusive = o.cached_input_tokens !== undefined || o.cache_write_input_tokens !== undefined;
     return {
-      input: pick("input_tokens", "prompt_tokens"),
+      input: inclusive ? Math.max(0, rawIn - cacheRead - cacheWrite) : rawIn,
       output: pick("output_tokens", "completion_tokens"),
+      cacheRead,
+      cacheWrite,
     };
   }
-  if (o.prompt_tokens !== undefined || o.completion_tokens !== undefined) {
+  if (o.input !== undefined || o.output !== undefined || o.inputOther !== undefined) {
     return {
-      input: pick("prompt_tokens", "input_tokens"),
-      output: pick("completion_tokens", "output_tokens"),
+      input: pick("input", "inputs", "inputOther"),
+      // opencode reports reasoning separately; providers bill it as output.
+      output: pick("output", "outputs") + pick("reasoning"),
+      cacheRead,
+      cacheWrite,
     };
   }
-  if (o.input !== undefined || o.output !== undefined) {
-    return { input: pick("input"), output: pick("output") };
+  if (cacheRead + cacheWrite > 0) {
+    return { input: 0, output: 0, cacheRead, cacheWrite };
   }
   return undefined;
 }

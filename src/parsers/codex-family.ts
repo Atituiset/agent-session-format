@@ -10,6 +10,7 @@ import {
   makeMsg,
   safeJsonParse,
 } from "../util.js";
+import type { ExtractedTokens } from "../util.js";
 import type { ParseOptions } from "./claude-code.js";
 
 export interface KimiWireOptions extends ParseOptions {
@@ -32,6 +33,8 @@ export function parseCodexRollout(text: string, opts: ParseOptions): NirSession 
   let model: string | null = null;
   const messages: NirMessage[] = [];
   const patchFiles = new Set<string>();
+  // token_count events carry a cumulative snapshot; only the latest matters.
+  let latestUsage: ExtractedTokens | undefined;
 
   const pushMessage = (p: Record<string, unknown>, ts: string | null) => {
     const role = p.role as string;
@@ -65,6 +68,15 @@ export function parseCodexRollout(text: string, opts: ParseOptions): NirSession 
     if (row.type === "turn_context") {
       const p = (row.payload ?? {}) as Record<string, unknown>;
       if (typeof p.model === "string") model = p.model;
+      continue;
+    }
+    if (row.type === "event_msg") {
+      const p = (row.payload ?? {}) as Record<string, unknown>;
+      if (p.type === "token_count") {
+        const info = (p.info ?? {}) as Record<string, unknown>;
+        const u = extractTokens(info.total_token_usage);
+        if (u) latestUsage = u;
+      }
       continue;
     }
     if (row.type === "message") {
@@ -128,15 +140,23 @@ export function parseCodexRollout(text: string, opts: ParseOptions): NirSession 
 
   if (messages.length === 0) return null;
   if (!id) throw new Error("parseCodexRollout: opts.id, opts.filePath, or a session_meta row is required");
-  return buildSession({
+  const session = buildSession({
     id,
     source: opts.source,
     sourceVersion,
     model,
     projectPath,
     messages,
+    ...(latestUsage ? { tokens: latestUsage } : {}),
     rawMeta: patchFiles.size > 0 ? { patchFiles: [...patchFiles] } : {},
   });
+  if (latestUsage) {
+    // Session totals ride on the last assistant message so consumers summing
+    // per-message tokens land on the same figure.
+    const lastAssistant = [...session.messages].reverse().find((m) => m.role === "assistant");
+    if (lastAssistant) lastAssistant.tokens = latestUsage;
+  }
+  return session;
 }
 
 /**
@@ -167,7 +187,7 @@ export function parseKimiWire(text: string, opts: KimiWireOptions): NirSession |
   let model: string | null = null;
   let startedAtMs: number | undefined;
   const messages: NirMessage[] = [];
-  const tokenTotals = { input: 0, output: 0 };
+  const tokenTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let durationMs: number | undefined;
   const lane =
     agentName === "main"
@@ -264,10 +284,14 @@ export function parseKimiWire(text: string, opts: KimiWireOptions): NirSession |
         break;
       }
       case "usage.record": {
+        // usageScope:"turn" — per-turn, safe to sum. (meta.usage echoes the
+        // same turn record on messages; do NOT read those or we'd double count.)
         const u = extractTokens(row.usage ?? row);
         if (u) {
           tokenTotals.input += u.input;
           tokenTotals.output += u.output;
+          tokenTotals.cacheRead += u.cacheRead;
+          tokenTotals.cacheWrite += u.cacheWrite;
         }
         break;
       }
@@ -287,7 +311,8 @@ export function parseKimiWire(text: string, opts: KimiWireOptions): NirSession |
     : { agent: agentName };
   if (durationMs !== undefined) rawMeta.durationMs = durationMs;
   rawMeta.estimatedTokens = messages.reduce((sum, m) => sum + estTokens(m.content), 0);
-  const hasTokens = tokenTotals.input + tokenTotals.output > 0;
+  const hasTokens =
+    tokenTotals.input + tokenTotals.output + tokenTotals.cacheRead + tokenTotals.cacheWrite > 0;
   const session = buildSession({
     id,
     source: opts.source,
@@ -295,12 +320,12 @@ export function parseKimiWire(text: string, opts: KimiWireOptions): NirSession |
     projectPath: null,
     startedAt: isoFromSecsOrMs(startedAtMs),
     messages,
-    ...(hasTokens ? { tokens: { ...tokenTotals, cacheRead: 0, cacheWrite: 0 } } : {}),
+    ...(hasTokens ? { tokens: { ...tokenTotals } } : {}),
     rawMeta,
   });
   if (hasTokens) {
     const lastAssistant = [...session.messages].reverse().find((m) => m.role === "assistant");
-    if (lastAssistant) lastAssistant.tokens = { ...tokenTotals, cacheRead: 0, cacheWrite: 0 };
+    if (lastAssistant) lastAssistant.tokens = { ...tokenTotals };
   }
   return session;
 }
