@@ -37,6 +37,7 @@ __export(src_exports, {
   nirRoleSchema: () => nirRoleSchema,
   nirSessionSchema: () => nirSessionSchema,
   nirTokenUsageSchema: () => nirTokenUsageSchema,
+  nirToolResultSchema: () => nirToolResultSchema,
   opencodeSessionFromDb: () => opencodeSessionFromDb,
   opencodeSessionsFromDb: () => opencodeSessionsFromDb,
   parseAntigravityTranscript: () => parseAntigravityTranscript,
@@ -55,6 +56,20 @@ module.exports = __toCommonJS(src_exports);
 // src/schema.ts
 var import_zod = require("zod");
 var nirRoleSchema = import_zod.z.enum(["user", "assistant", "tool", "system"]);
+var nirToolResultSchema = import_zod.z.object({
+  status: import_zod.z.enum(["success", "error", "cancelled", "unknown"]),
+  /**
+   * `source_is_error`   — claude `tool_result.is_error`
+   * `source_status`     — opencode/antigravity part state status
+   * `source_error_text` — opencode `state.error` carried over verbatim
+   * `derived`           — inferred from output text (last resort, see `detail`)
+   */
+  method: import_zod.z.enum(["source_is_error", "source_status", "derived"]),
+  /** Verbatim provider error text, when the source exposed one. */
+  errorText: import_zod.z.string().nullable().default(null),
+  /** Provider-specific extras (exit code, background-task flag), when present. */
+  detail: import_zod.z.record(import_zod.z.string(), import_zod.z.unknown()).default({})
+});
 var nirTokenUsageSchema = import_zod.z.object({
   input: import_zod.z.number().int().nonnegative().default(0),
   output: import_zod.z.number().int().nonnegative().default(0),
@@ -74,6 +89,10 @@ var nirMessageSchema = import_zod.z.object({
   model: import_zod.z.string().nullable(),
   thinking: import_zod.z.string().nullable().default(null),
   tokens: nirTokenUsageSchema.optional(),
+  // Structured tool outcome, set ONLY on `role: "tool"` messages and ONLY when
+  // the source format provided a signal. Absent means "the source said nothing",
+  // which is NOT the same as `status: "unknown"`.
+  toolResult: nirToolResultSchema.optional(),
   // Swimlane id for subagent messages; absent/null means the main lane.
   agent: import_zod.z.string().nullable().default(null),
   agentLabel: import_zod.z.string().nullable().default(null)
@@ -341,12 +360,23 @@ function parseClaudeCodeTranscript(text, opts) {
             (x) => x && typeof x === "object" && x.type === "text" ? String(x.text ?? "") : ""
           ).join("\n");
         }
+        const isError = b.is_error === true;
         messages.push(
           makeMsg({
             role: "tool",
             content: text2,
             toolCallId: typeof b.tool_use_id === "string" ? b.tool_use_id : null,
             timestamp: ts,
+            // Only claim a signal when the source actually provided one: a
+            // missing `is_error` key means "unknown", not "success".
+            ...typeof b.is_error === "boolean" ? {
+              toolResult: {
+                status: isError ? "error" : "success",
+                method: "source_is_error",
+                errorText: isError ? text2.slice(0, 500) : null,
+                detail: {}
+              }
+            } : {},
             ...lane
           })
         );
@@ -930,6 +960,8 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
           })
         );
         const output = state.output;
+        const status = typeof state.status === "string" ? state.status : null;
+        const errorText = typeof state.error === "string" ? state.error : null;
         if (typeof output === "string") {
           messages.push(
             makeMsg({
@@ -937,7 +969,31 @@ async function mapSessionRow(row, msgStmt, partStmt, opts) {
               content: output,
               toolName: pd.tool,
               toolCallId: callId,
-              timestamp: ts
+              timestamp: ts,
+              ...status !== null ? {
+                toolResult: {
+                  status: status === "error" ? "error" : status === "running" ? "unknown" : "success",
+                  method: "source_status",
+                  errorText: errorText === null ? null : errorText.slice(0, 500),
+                  detail: {}
+                }
+              } : {}
+            })
+          );
+        } else if (status === "error" || errorText !== null) {
+          messages.push(
+            makeMsg({
+              role: "tool",
+              content: "",
+              toolName: pd.tool,
+              toolCallId: callId,
+              timestamp: ts,
+              toolResult: {
+                status: "error",
+                method: "source_status",
+                errorText: errorText === null ? null : errorText.slice(0, 500),
+                detail: {}
+              }
             })
           );
         }
@@ -1080,12 +1136,22 @@ function parseAntigravityTranscript(text, opts) {
         );
         const output = extractString(row, "output");
         if (output) {
+          const failed = /The command failed with exit code:\s*([1-9]\d*)/.exec(output);
+          const ok = /The command completed successfully/.test(output);
           messages.push(
             makeMsg({
               role: "tool",
               content: output,
               toolName: "bash",
-              timestamp: ts
+              timestamp: ts,
+              ...failed || ok ? {
+                toolResult: {
+                  status: failed ? "error" : "success",
+                  method: "derived",
+                  errorText: failed ? output.slice(0, 500) : null,
+                  detail: failed ? { exitCode: Number(failed[1]), providerText: true } : { providerText: true }
+                }
+              } : {}
             })
           );
         }
@@ -1400,6 +1466,7 @@ function parseDetectedTranscript(kind, text, opts) {
   nirRoleSchema,
   nirSessionSchema,
   nirTokenUsageSchema,
+  nirToolResultSchema,
   opencodeSessionFromDb,
   opencodeSessionsFromDb,
   parseAntigravityTranscript,

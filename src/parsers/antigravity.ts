@@ -95,12 +95,33 @@ export function parseAntigravityTranscript(text: string, opts: ParseOptions): Ni
         );
         const output = extractString(row, "output");
         if (output) {
+          // Antigravity has no per-tool verdict FIELD — but it does emit fixed,
+          // provider-generated status text ("The command failed with exit code:
+          // 1" / "The command completed successfully"). That is far stronger
+          // than a consumer-side regex over arbitrary output, so it is captured
+          // as `derived`: usable, but explicitly not a source-reported signal.
+          // (The `ERROR_MESSAGE` row type in this format is a MODEL-level tool-
+          // call parse failure, not a tool result, so it does not belong here.)
+          const failed = /The command failed with exit code:\s*([1-9]\d*)/.exec(output);
+          const ok = /The command completed successfully/.test(output);
           messages.push(
             makeMsg({
               role: "tool",
               content: output,
               toolName: "bash",
               timestamp: ts,
+              ...(failed || ok
+                ? {
+                    toolResult: {
+                      status: failed ? ("error" as const) : ("success" as const),
+                      method: "derived" as const,
+                      errorText: failed ? output.slice(0, 500) : null,
+                      detail: failed
+                        ? { exitCode: Number(failed[1]), providerText: true }
+                        : { providerText: true },
+                    },
+                  }
+                : {}),
             }),
           );
         }

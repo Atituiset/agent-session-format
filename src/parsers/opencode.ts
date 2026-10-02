@@ -160,7 +160,16 @@ async function mapSessionRow(
           }),
         );
         const output = state.output;
+        const status = typeof state.status === "string" ? state.status : null;
+        const errorText = typeof state.error === "string" ? state.error : null;
         if (typeof output === "string") {
+          // opencode records the verdict structurally in `state.status`
+          // ("completed" | "error" | "running") and carries the provider's
+          // message in `state.error`. Measured on a real database: 2961
+          // completed / 38 error / 1 running. Until 0.5.0 this was dropped, so
+          // a failed tool and a successful one both arrived as bare text — and
+          // an errored tool often has NO output at all, which is why regex
+          // recovery measured ~0.2% on this source.
           messages.push(
             makeMsg({
               role: "tool",
@@ -168,6 +177,40 @@ async function mapSessionRow(
               toolName: pd.tool,
               toolCallId: callId,
               timestamp: ts,
+              ...(status !== null
+                ? {
+                    toolResult: {
+                      status:
+                        status === "error"
+                          ? ("error" as const)
+                          : status === "running"
+                            ? ("unknown" as const)
+                            : ("success" as const),
+                      method: "source_status" as const,
+                      errorText: errorText === null ? null : errorText.slice(0, 500),
+                      detail: {},
+                    },
+                  }
+                : {}),
+            }),
+          );
+        } else if (status === "error" || errorText !== null) {
+          // A failed tool frequently has no `output` at all — that is exactly the
+          // case regex recovery could never see. Emit the message anyway so the
+          // failure is not silently dropped from the transcript.
+          messages.push(
+            makeMsg({
+              role: "tool",
+              content: "",
+              toolName: pd.tool,
+              toolCallId: callId,
+              timestamp: ts,
+              toolResult: {
+                status: "error" as const,
+                method: "source_status" as const,
+                errorText: errorText === null ? null : errorText.slice(0, 500),
+                detail: {},
+              },
             }),
           );
         }

@@ -38,6 +38,11 @@ export function parseHermesDump(
     if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") continue;
     const content = normalizeHermesContent(msg.content);
     if (role === "tool") {
+      // Hermes persists no verdict column on `messages` (columns verified:
+      // id, session_id, role, content, tool_call_id, tool_calls, tool_name,
+      // timestamp, token_count, finish_reason, reasoning, …). Measured over 400
+      // real tool rows, only 5% contain any regex-visible verdict. So no
+      // `toolResult` is emitted — absence here is honest, not a gap.
       messages.push(makeMsg({ role: "tool", content, timestamp }));
       continue;
     }

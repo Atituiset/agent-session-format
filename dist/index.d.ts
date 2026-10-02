@@ -6,6 +6,47 @@ declare const nirRoleSchema: z.ZodEnum<{
     tool: "tool";
     system: "system";
 }>;
+/**
+ * Structured outcome of a tool call, when the SOURCE FORMAT PROVIDES ONE.
+ *
+ * Why this exists: until 0.5.0, NIR carried no success/failure signal at all —
+ * tool results were flattened into `content` and consumers had to regex them.
+ * Measured on a real corpus, that made a verdict recoverable for ~0.2% of
+ * opencode tool results and ~11% of Claude's, so any outcome-conditioned
+ * analysis was mostly measuring which harness happens to write exit codes into
+ * its transcripts.
+ *
+ * Most source formats DO carry a structured signal and the parsers were
+ * discarding it. Measured availability in the raw formats:
+ *
+ *   claude-code   tool_result.is_error            — boolean, present on most rows
+ *   opencode      part.state.status ("completed" | "error" | "running") + state.error
+ *   antigravity   output shape ("completed successfully" / failure text)
+ *   codex         payload has only {call_id, output} — NO structured signal
+ *   hermes        message row has no verdict column — NO structured signal
+ *
+ * `method` records WHICH of these produced the status, so a consumer can tell a
+ * source-reported failure from a derived one, and can report coverage honestly.
+ * Absent field = the source provided nothing. That is different from
+ * `status: "unknown"`, which means the source provided a signal we could not
+ * interpret.
+ */
+declare const nirToolResultSchema: z.ZodObject<{
+    status: z.ZodEnum<{
+        success: "success";
+        error: "error";
+        cancelled: "cancelled";
+        unknown: "unknown";
+    }>;
+    method: z.ZodEnum<{
+        source_is_error: "source_is_error";
+        source_status: "source_status";
+        derived: "derived";
+    }>;
+    errorText: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    detail: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
+}, z.core.$strip>;
+type NirToolResult = z.infer<typeof nirToolResultSchema>;
 declare const nirTokenUsageSchema: z.ZodObject<{
     input: z.ZodDefault<z.ZodNumber>;
     output: z.ZodDefault<z.ZodNumber>;
@@ -31,6 +72,21 @@ declare const nirMessageSchema: z.ZodObject<{
         output: z.ZodDefault<z.ZodNumber>;
         cacheRead: z.ZodDefault<z.ZodNumber>;
         cacheWrite: z.ZodDefault<z.ZodNumber>;
+    }, z.core.$strip>>;
+    toolResult: z.ZodOptional<z.ZodObject<{
+        status: z.ZodEnum<{
+            success: "success";
+            error: "error";
+            cancelled: "cancelled";
+            unknown: "unknown";
+        }>;
+        method: z.ZodEnum<{
+            source_is_error: "source_is_error";
+            source_status: "source_status";
+            derived: "derived";
+        }>;
+        errorText: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        detail: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     }, z.core.$strip>>;
     agent: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     agentLabel: z.ZodDefault<z.ZodNullable<z.ZodString>>;
@@ -70,6 +126,21 @@ declare const nirSessionSchema: z.ZodObject<{
             output: z.ZodDefault<z.ZodNumber>;
             cacheRead: z.ZodDefault<z.ZodNumber>;
             cacheWrite: z.ZodDefault<z.ZodNumber>;
+        }, z.core.$strip>>;
+        toolResult: z.ZodOptional<z.ZodObject<{
+            status: z.ZodEnum<{
+                success: "success";
+                error: "error";
+                cancelled: "cancelled";
+                unknown: "unknown";
+            }>;
+            method: z.ZodEnum<{
+                source_is_error: "source_is_error";
+                source_status: "source_status";
+                derived: "derived";
+            }>;
+            errorText: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+            detail: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
         }, z.core.$strip>>;
         agent: z.ZodDefault<z.ZodNullable<z.ZodString>>;
         agentLabel: z.ZodDefault<z.ZodNullable<z.ZodString>>;
@@ -296,4 +367,4 @@ declare function parseDetectedTranscript(kind: GenericKind, text: string, opts: 
     id?: string;
 }): NirSession | null;
 
-export { type GenericKind, type KimiWireOptions, type NirMessage, type NirRole, type NirSession, type NirTokenUsage, type OpencodeOptions, type ParseOptions, type SqliteDb, type SqliteStatement, buildSession, collectPatchFiles, decodeClaudeProjectSlug, detectKind, estTokens, extractTokens, flattenContent, hermesSessionFromDb, hermesSessionsFromDb, isoFromMs, isoFromSecsOrMs, makeMsg, makeNirSession, nirMessageSchema, nirRoleSchema, nirSessionSchema, nirTokenUsageSchema, opencodeSessionFromDb, opencodeSessionsFromDb, parseAntigravityTranscript, parseChatTranscript, parseClaudeCodeTranscript, parseCodewhaleSession, parseCodexRollout, parseDetectedTranscript, parseHermesDump, parseKimiWire, parseSessionJsonDocument, safeJsonParse };
+export { type GenericKind, type KimiWireOptions, type NirMessage, type NirRole, type NirSession, type NirTokenUsage, type NirToolResult, type OpencodeOptions, type ParseOptions, type SqliteDb, type SqliteStatement, buildSession, collectPatchFiles, decodeClaudeProjectSlug, detectKind, estTokens, extractTokens, flattenContent, hermesSessionFromDb, hermesSessionsFromDb, isoFromMs, isoFromSecsOrMs, makeMsg, makeNirSession, nirMessageSchema, nirRoleSchema, nirSessionSchema, nirTokenUsageSchema, nirToolResultSchema, opencodeSessionFromDb, opencodeSessionsFromDb, parseAntigravityTranscript, parseChatTranscript, parseClaudeCodeTranscript, parseCodewhaleSession, parseCodexRollout, parseDetectedTranscript, parseHermesDump, parseKimiWire, parseSessionJsonDocument, safeJsonParse };

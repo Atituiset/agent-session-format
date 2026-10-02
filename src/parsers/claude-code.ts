@@ -170,12 +170,30 @@ export function parseClaudeCodeTranscript(text: string, opts: ParseOptions): Nir
             )
             .join("\n");
         }
+        // Claude Code records the tool's verdict structurally in
+        // `tool_result.is_error`. Until 0.5.0 this was dropped, forcing every
+        // consumer to regex the output text — which recovered a verdict for only
+        // ~11% of results, because most successful tools print nothing
+        // recognizable. `is_error` is present on most rows and is authoritative.
+        const isError = b.is_error === true;
         messages.push(
           makeMsg({
             role: "tool",
             content: text,
             toolCallId: typeof b.tool_use_id === "string" ? b.tool_use_id : null,
             timestamp: ts,
+            // Only claim a signal when the source actually provided one: a
+            // missing `is_error` key means "unknown", not "success".
+            ...(typeof b.is_error === "boolean"
+              ? {
+                  toolResult: {
+                    status: isError ? ("error" as const) : ("success" as const),
+                    method: "source_is_error" as const,
+                    errorText: isError ? text.slice(0, 500) : null,
+                    detail: {},
+                  },
+                }
+              : {}),
             ...lane,
           }),
         );

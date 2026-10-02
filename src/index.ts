@@ -1,11 +1,18 @@
 export {
   nirRoleSchema,
   nirTokenUsageSchema,
+  nirToolResultSchema,
   nirMessageSchema,
   nirSessionSchema,
   makeNirSession,
 } from "./schema.js";
-export type { NirRole, NirTokenUsage, NirMessage, NirSession } from "./schema.js";
+export type {
+  NirRole,
+  NirTokenUsage,
+  NirToolResult,
+  NirMessage,
+  NirSession,
+} from "./schema.js";
 
 export {
   isoFromMs,

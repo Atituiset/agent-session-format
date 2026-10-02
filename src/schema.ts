@@ -2,6 +2,48 @@ import { z } from "zod";
 
 export const nirRoleSchema = z.enum(["user", "assistant", "tool", "system"]);
 
+/**
+ * Structured outcome of a tool call, when the SOURCE FORMAT PROVIDES ONE.
+ *
+ * Why this exists: until 0.5.0, NIR carried no success/failure signal at all —
+ * tool results were flattened into `content` and consumers had to regex them.
+ * Measured on a real corpus, that made a verdict recoverable for ~0.2% of
+ * opencode tool results and ~11% of Claude's, so any outcome-conditioned
+ * analysis was mostly measuring which harness happens to write exit codes into
+ * its transcripts.
+ *
+ * Most source formats DO carry a structured signal and the parsers were
+ * discarding it. Measured availability in the raw formats:
+ *
+ *   claude-code   tool_result.is_error            — boolean, present on most rows
+ *   opencode      part.state.status ("completed" | "error" | "running") + state.error
+ *   antigravity   output shape ("completed successfully" / failure text)
+ *   codex         payload has only {call_id, output} — NO structured signal
+ *   hermes        message row has no verdict column — NO structured signal
+ *
+ * `method` records WHICH of these produced the status, so a consumer can tell a
+ * source-reported failure from a derived one, and can report coverage honestly.
+ * Absent field = the source provided nothing. That is different from
+ * `status: "unknown"`, which means the source provided a signal we could not
+ * interpret.
+ */
+export const nirToolResultSchema = z.object({
+  status: z.enum(["success", "error", "cancelled", "unknown"]),
+  /**
+   * `source_is_error`   — claude `tool_result.is_error`
+   * `source_status`     — opencode/antigravity part state status
+   * `source_error_text` — opencode `state.error` carried over verbatim
+   * `derived`           — inferred from output text (last resort, see `detail`)
+   */
+  method: z.enum(["source_is_error", "source_status", "derived"]),
+  /** Verbatim provider error text, when the source exposed one. */
+  errorText: z.string().nullable().default(null),
+  /** Provider-specific extras (exit code, background-task flag), when present. */
+  detail: z.record(z.string(), z.unknown()).default({}),
+});
+
+export type NirToolResult = z.infer<typeof nirToolResultSchema>;
+
 export const nirTokenUsageSchema = z.object({
   input: z.number().int().nonnegative().default(0),
   output: z.number().int().nonnegative().default(0),
@@ -22,6 +64,10 @@ export const nirMessageSchema = z.object({
   model: z.string().nullable(),
   thinking: z.string().nullable().default(null),
   tokens: nirTokenUsageSchema.optional(),
+  // Structured tool outcome, set ONLY on `role: "tool"` messages and ONLY when
+  // the source format provided a signal. Absent means "the source said nothing",
+  // which is NOT the same as `status: "unknown"`.
+  toolResult: nirToolResultSchema.optional(),
   // Swimlane id for subagent messages; absent/null means the main lane.
   agent: z.string().nullable().default(null),
   agentLabel: z.string().nullable().default(null),

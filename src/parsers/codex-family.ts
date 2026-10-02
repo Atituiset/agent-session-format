@@ -126,6 +126,11 @@ export function parseCodexRollout(text: string, opts: ParseOptions): NirSession 
       }
     } else if (pt === "function_call_output" || pt === "custom_tool_call_output") {
       const output = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? null);
+      // Codex rollouts carry NO structured verdict: the `function_call_output`
+      // payload has exactly {type, call_id, output} — verified across 98 real
+      // output rows. Codex omits the exit code it clearly has. So no
+      // `toolResult` is emitted here, and a consumer must treat "absent" as
+      // unmeasured rather than inferring success from a non-empty output.
       messages.push(
         makeMsg({
           role: "tool",
