@@ -95,6 +95,71 @@ function excerpt(text: string, at: number): string {
 }
 
 /**
+ * Kimi task verdict — the richest signal any source exposes.
+ *
+ * Measured vocabulary across 683 real task records:
+ *   completed 522 | killed 85 | failed 44 | timed_out 18 | lost 11 | running 3
+ * with 577 carrying an `exitCode` (108 of them non-zero) and 99 a `stopReason`
+ * (a readable reason such as "curl 挂起,改用 python 获取").
+ *
+ * Mapping notes:
+ * - `completed` is only success when `exitCode` is 0 or absent. A command can
+ *   complete and still have failed.
+ * - `timed_out` maps to `cancelled` rather than `error`: the command did not
+ *   report failure, it was cut off. Collapsing the two would invent failures.
+ * - `lost` and `killed` are both errors but are NOT the same event — an agent
+ *   that killed a runaway curl is behaving differently from one whose command
+ *   died. The distinction is preserved in `detail.status`.
+ */
+function kimiTaskVerdict(info: Record<string, unknown>): NirToolResult | undefined {
+  const status = typeof info.status === "string" ? info.status : null;
+  if (status === null) return undefined;
+  const exitCode = typeof info.exitCode === "number" ? info.exitCode : undefined;
+  const stopReason = typeof info.stopReason === "string" ? info.stopReason : null;
+
+  let verdict: "success" | "error" | "cancelled" | "unknown";
+  if (status === "running") verdict = "unknown";
+  else if (status === "timed_out") verdict = "cancelled";
+  else if (status === "completed") {
+    verdict = exitCode === undefined || exitCode === 0 ? "success" : "error";
+  } else verdict = "error"; // failed | killed | lost
+
+  return {
+    status: verdict,
+    // source-reported: this is a field in the event, not parsed from prose.
+    method: "source_status",
+    errorText: verdict === "success" ? null : JSON.stringify(pickErrorBits(info)).slice(0, 300),
+    detail: {
+      status,
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(stopReason !== null ? { stopReason } : {}),
+      ...(typeof info.kind === "string" ? { kind: info.kind } : {}),
+      ...(typeof info.detached === "boolean" ? { detached: info.detached } : {}),
+    },
+  };
+}
+
+/** The fields worth keeping in the error evidence, not the whole record. */
+function pickErrorBits(info: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (info.status !== undefined) out.status = info.status;
+  if (info.exitCode !== undefined) out.exitCode = info.exitCode;
+  if (info.stopReason !== undefined) out.stopReason = info.stopReason;
+  if (info.taskId !== undefined) out.taskId = info.taskId;
+  return out;
+}
+
+/** Human-readable one-liner standing in for a task's (separate) output log. */
+function kimiTaskText(info: Record<string, unknown>): string {
+  const bits: string[] = [];
+  if (typeof info.status === "string") bits.push(`task ${info.status}`);
+  if (typeof info.exitCode === "number") bits.push(`exit ${info.exitCode}`);
+  if (typeof info.stopReason === "string") bits.push(info.stopReason);
+  if (typeof info.command === "string") bits.push(`\n$ ${info.command.slice(0, 400)}`);
+  return bits.join(" ");
+}
+
+/**
  * Parse a Codex CLI rollout `.jsonl` (also used by DeepSeek and other
  * Responses-API-style event streams). Handles both the real
  * `{type:"response_item", payload}` envelope and the older flat
@@ -314,6 +379,41 @@ export function parseKimiWire(text: string, opts: KimiWireOptions): NirSession |
               toolCallId: typeof c.id === "string" ? c.id : null,
               timestamp: ts,
               model,
+              ...lane,
+            }),
+          );
+        }
+        break;
+      }
+      case "task.terminated": {
+        // Kimi reports EVERY background/detached command's verdict inline, as a
+        // `task.terminated` event carrying the full task info object:
+        //   {taskId, status: completed|killed|failed|timed_out|lost|running,
+        //    exitCode, stopReason, command, startedAt, endedAt}
+        //
+        // 0.5.0 recorded kimi as signal-free and 0.6.0 only tried codex's exec
+        // envelopes. Both were wrong: this event was in the file the parser
+        // already reads. Measured across 683 real task records the status
+        // vocabulary is completed 522 / killed 85 / failed 44 / timed_out 18 /
+        // lost 11, with 108 non-zero exit codes — richer than any other source.
+        //
+        // It is emitted as a `tool` message keyed by taskId so it pairs with the
+        // `tool.call` that started it, which is how a consumer learns that a
+        // detached command finished (and how it went).
+        const info = row.info as Record<string, unknown> | undefined;
+        if (info && typeof info === "object") {
+          const taskId = typeof info.taskId === "string" ? info.taskId : null;
+          messages.push(
+            makeMsg({
+              role: "tool",
+              content: kimiTaskText(info),
+              toolName: info.kind === "agent" ? "task" : "bash",
+              toolCallId: taskId,
+              timestamp: isoFromSecsOrMs(info.endedAt),
+              ...(() => {
+                const v = kimiTaskVerdict(info);
+                return v ? { toolResult: v } : {};
+              })(),
               ...lane,
             }),
           );

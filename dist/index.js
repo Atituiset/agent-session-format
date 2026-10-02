@@ -458,6 +458,48 @@ function excerpt(text, at) {
   const end = Math.min(text.length, at + 120);
   return `${start > 0 ? "\u2026" : ""}${text.slice(start, end).replace(/\s+/g, " ")}${end < text.length ? "\u2026" : ""}`;
 }
+function kimiTaskVerdict(info) {
+  const status = typeof info.status === "string" ? info.status : null;
+  if (status === null) return void 0;
+  const exitCode = typeof info.exitCode === "number" ? info.exitCode : void 0;
+  const stopReason = typeof info.stopReason === "string" ? info.stopReason : null;
+  let verdict;
+  if (status === "running") verdict = "unknown";
+  else if (status === "timed_out") verdict = "cancelled";
+  else if (status === "completed") {
+    verdict = exitCode === void 0 || exitCode === 0 ? "success" : "error";
+  } else verdict = "error";
+  return {
+    status: verdict,
+    // source-reported: this is a field in the event, not parsed from prose.
+    method: "source_status",
+    errorText: verdict === "success" ? null : JSON.stringify(pickErrorBits(info)).slice(0, 300),
+    detail: {
+      status,
+      ...exitCode !== void 0 ? { exitCode } : {},
+      ...stopReason !== null ? { stopReason } : {},
+      ...typeof info.kind === "string" ? { kind: info.kind } : {},
+      ...typeof info.detached === "boolean" ? { detached: info.detached } : {}
+    }
+  };
+}
+function pickErrorBits(info) {
+  const out = {};
+  if (info.status !== void 0) out.status = info.status;
+  if (info.exitCode !== void 0) out.exitCode = info.exitCode;
+  if (info.stopReason !== void 0) out.stopReason = info.stopReason;
+  if (info.taskId !== void 0) out.taskId = info.taskId;
+  return out;
+}
+function kimiTaskText(info) {
+  const bits = [];
+  if (typeof info.status === "string") bits.push(`task ${info.status}`);
+  if (typeof info.exitCode === "number") bits.push(`exit ${info.exitCode}`);
+  if (typeof info.stopReason === "string") bits.push(info.stopReason);
+  if (typeof info.command === "string") bits.push(`
+$ ${info.command.slice(0, 400)}`);
+  return bits.join(" ");
+}
 function parseCodexRollout(text, opts) {
   let id = opts.id ?? (opts.filePath ? basenameNoExt(opts.filePath, ".jsonl") : void 0);
   let projectPath = null;
@@ -636,6 +678,27 @@ function parseKimiWire(text, opts) {
               toolCallId: typeof c.id === "string" ? c.id : null,
               timestamp: ts,
               model,
+              ...lane
+            })
+          );
+        }
+        break;
+      }
+      case "task.terminated": {
+        const info = row.info;
+        if (info && typeof info === "object") {
+          const taskId = typeof info.taskId === "string" ? info.taskId : null;
+          messages.push(
+            makeMsg({
+              role: "tool",
+              content: kimiTaskText(info),
+              toolName: info.kind === "agent" ? "task" : "bash",
+              toolCallId: taskId,
+              timestamp: isoFromSecsOrMs(info.endedAt),
+              ...(() => {
+                const v = kimiTaskVerdict(info);
+                return v ? { toolResult: v } : {};
+              })(),
               ...lane
             })
           );

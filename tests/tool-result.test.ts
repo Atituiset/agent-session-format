@@ -6,6 +6,7 @@ import {
   parseAntigravityTranscript,
   parseClaudeCodeTranscript,
   parseCodexRollout,
+  parseKimiWire,
 } from "../src/index";
 
 /**
@@ -290,6 +291,80 @@ describe("codex tool outcomes", () => {
       id: "s1",
     });
     expect(s?.messages.find((m) => m.role === "tool")?.toolResult).toBeUndefined();
+  });
+});
+
+describe("kimi task verdicts", () => {
+  const wire = (info: Record<string, unknown>) =>
+    JSON.stringify({ type: "task.terminated", agentId: "agent-0", info, time: 1790612683010 }) +
+    "\n";
+
+  const OPTS = {
+    source: "kimi-code",
+    id: "s1",
+    filePath: "/x/session_s1/agents/agent-0/wire.jsonl",
+  } as const;
+
+  it("completed with exitCode 0 is success", () => {
+    const s = parseKimiWire(wire({ taskId: "bash-1", status: "completed", exitCode: 0, kind: "process" }), OPTS);
+    const r = s?.messages.find((m) => m.role === "tool");
+    expect(r?.toolResult).toMatchObject({ status: "success", method: "source_status" });
+    expect(r?.toolResult?.detail.status).toBe("completed");
+  });
+
+  it("completed with a NON-zero exitCode is an error", () => {
+    // A command can finish and still have failed — the status alone is not enough.
+    const s = parseKimiWire(wire({ taskId: "bash-1", status: "completed", exitCode: 2, kind: "process" }), OPTS);
+    expect(s?.messages.find((m) => m.role === "tool")?.toolResult?.status).toBe("error");
+  });
+
+  it("failed / killed / lost are errors, kept distinct in detail.status", () => {
+    for (const st of ["failed", "killed", "lost"]) {
+      const s = parseKimiWire(wire({ taskId: "b1", status: st, kind: "process" }), OPTS);
+      const r = s?.messages.find((m) => m.role === "tool")?.toolResult;
+      expect(r?.status).toBe("error");
+      expect(r?.detail.status).toBe(st);
+    }
+  });
+
+  it("timed_out is CANCELLED, not error", () => {
+    // The command did not report failure — it was cut off. Mapping it to error
+    // would invent failures that never happened.
+    const s = parseKimiWire(wire({ taskId: "b1", status: "timed_out", kind: "process" }), OPTS);
+    expect(s?.messages.find((m) => m.role === "tool")?.toolResult?.status).toBe("cancelled");
+  });
+
+  it("running is unknown, not a failure", () => {
+    const s = parseKimiWire(wire({ taskId: "b1", status: "running", kind: "process" }), OPTS);
+    expect(s?.messages.find((m) => m.role === "tool")?.toolResult?.status).toBe("unknown");
+  });
+
+  it("stopReason is preserved verbatim", () => {
+    const s = parseKimiWire(
+      wire({ taskId: "b1", status: "killed", stopReason: "curl 挂起,改用 python 获取", kind: "process" }),
+      OPTS,
+    );
+    const r = s?.messages.find((m) => m.role === "tool")?.toolResult;
+    expect(r?.detail.stopReason).toBe("curl 挂起,改用 python 获取");
+    expect(r?.errorText).toContain("挂起");
+  });
+
+  it("the tool result pairs with the taskId that started the command", () => {
+    const s = parseKimiWire(wire({ taskId: "bash-zzmkjcya", status: "completed", exitCode: 0 }), OPTS);
+    expect(s?.messages.find((m) => m.role === "tool")?.toolCallId).toBe("bash-zzmkjcya");
+  });
+
+  it("agent-kind tasks are labelled as delegation", () => {
+    const s = parseKimiWire(
+      wire({ taskId: "a1", status: "completed", exitCode: 0, kind: "agent", agentId: "agent-3" }),
+      OPTS,
+    );
+    expect(s?.messages.find((m) => m.role === "tool")?.toolName).toBe("task");
+  });
+
+  it("a row with no info object is skipped rather than crashing", () => {
+    const s = parseKimiWire(JSON.stringify({ type: "task.terminated", time: 1 }) + "\n", OPTS);
+    expect(s?.messages.find((m) => m.role === "tool")).toBeUndefined();
   });
 });
 
