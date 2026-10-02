@@ -57,6 +57,20 @@ export const nirMessageSchema = z.object({
   timestamp: z.string().nullable(),
   toolName: z.string().nullable(),
   toolInput: z.unknown(),
+  /**
+   * Normalized file path this call targets, or null when it targets none.
+   *
+   * Derived by `makeMsg` from the harness's own field spelling (see
+   * `targetPathOf`) so no parser has to remember it. Optional and nullable on
+   * purpose: a 0.7 consumer is unaffected, and a call that touches no file says
+   * so honestly rather than by omission.
+   *
+   * It lives on the CALL rather than on `toolResult` because reading a file does
+   * not depend on the read having succeeded — 79% of calls carry no verdict, and
+   * nesting targets there would hide them from the majority of file-touching
+   * calls.
+   */
+  toolTarget: z.string().nullable().default(null),
   // Tool-call correlation id (Claude `tool_use.id`, Codex `call_id`, OpenAI
   // `tool_calls[].id`). Set on both the assistant tool-call message and the
   // tool-result message so consumers can pair them.

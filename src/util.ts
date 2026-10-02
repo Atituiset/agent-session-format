@@ -33,6 +33,43 @@ export function collectPatchFiles(patch: string, out: Set<string>): void {
   }
 }
 
+/**
+ * File-path-ish keys in tool inputs, across every harness measured so far.
+ *
+ * Owned here because it is a wire-format fact, not an interpretation: these are
+ * simply the spellings the harnesses use. It was previously duplicated in four
+ * places (session-forge `enrich/index.ts`, session-forge `writers/codex_rollup.ts`,
+ * behavior-lab `canonical.ts`, and ad-hoc in the viewer), each with a different
+ * list and order, none of which could see the others drift.
+ *
+ * Order matters and is not alphabetical: the more specific spellings come first
+ * so a tool that carries both `file_path` and a generic `path` resolves to the
+ * real target. `query` is deliberately NOT here — it is a search term, not a path,
+ * and including it is what let opencode's `extractTarget` return a grep pattern as
+ * if it were a file.
+ */
+export const FILE_PATH_KEYS = [
+  "filePath",
+  "file_path",
+  "notebook_path",
+  "notebookPath",
+  "target_file",
+  "targetFile",
+  "path",
+  "file",
+] as const;
+
+/** Pull the target file path out of a tool input, or null if it has none. */
+export function targetPathOf(toolInput: unknown): string | null {
+  if (!toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) return null;
+  const obj = toolInput as Record<string, unknown>;
+  for (const key of FILE_PATH_KEYS) {
+    const v = obj[key];
+    if (typeof v === "string" && v !== "") return v;
+  }
+  return null;
+}
+
 export function makeMsg(partial: Partial<NirMessage> & { role: NirMessage["role"] }): NirMessage {
   // Spread partial FIRST so explicitly-passed defaults win; then re-apply the
   // fallbacks only for keys that are still undefined.
@@ -42,6 +79,14 @@ export function makeMsg(partial: Partial<NirMessage> & { role: NirMessage["role"
     timestamp: partial.timestamp ?? null,
     toolName: partial.toolName ?? null,
     toolInput: partial.toolInput ?? null,
+    // Derived, never passed in by a parser: the target path is a fact about the
+    // wire format's spelling, and deriving it here means no parser can forget.
+    //
+    // It hangs on the CALL message rather than on toolResult because reading a
+    // file does not require knowing whether the read succeeded — 79% of calls
+    // carry no verdict, and attaching targets there would hide them from exactly
+    // the majority of calls that touch a file.
+    toolTarget: partial.toolTarget ?? targetPathOf(partial.toolInput),
     toolCallId: partial.toolCallId ?? null,
     model: partial.model ?? null,
     thinking: partial.thinking ?? null,

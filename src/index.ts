@@ -24,6 +24,10 @@ export {
   buildSession,
   extractTokens,
   flattenContent,
+  // Consumers must not re-guess which input field holds a file path; this table
+  // is the single owner of those spellings.
+  FILE_PATH_KEYS,
+  targetPathOf,
 } from "./util.js";
 
 export type { SqliteDb, SqliteStatement } from "./sqlite.js";
